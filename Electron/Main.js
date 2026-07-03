@@ -60,10 +60,12 @@ function createWindow() {
     hasShadow: false,
     backgroundColor: '#00000000',
     roundedCorners: true,
-    // macOS vibrancy
-    vibrancy: process.platform === 'darwin' ? 'hud' : undefined,
-    visualEffectState: process.platform === 'darwin' ? 'active' : undefined,
-    // Windows 11 acrylic (Electron >= 27 via backgroundMaterial)
+    // NOTE: intentionally NOT using native `vibrancy` here. It fights with
+    // the CSS backdrop-filter glassmorphism already built into styles.css —
+    // the two compositing layers together caused the black-flash-until-drag
+    // bug. Let CSS own the glass effect entirely.
+    // Windows 11 acrylic (Electron >= 27 via backgroundMaterial) is fine to
+    // keep since Windows doesn't have the same conflict.
     backgroundMaterial: process.platform === 'win32' ? 'acrylic' : undefined,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -74,8 +76,11 @@ function createWindow() {
     },
   });
 
-  // Keep it above fullscreen apps / other always-on-top windows too
-  mainWindow.setAlwaysOnTop(true, 'screen-saver');
+  // 'floating' (not 'screen-saver') — screen-saver level is the most
+  // aggressive always-on-top tier macOS has and interferes with normal
+  // focus/blur semantics, which is why outside clicks weren't hiding the
+  // window. 'floating' is what Spotlight/Alfred-style overlays use.
+  mainWindow.setAlwaysOnTop(true, 'floating');
   mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
 
   mainWindow.loadFile(path.join(__dirname, '..', 'frontend', 'overlay.html'));
@@ -115,6 +120,15 @@ function showOverlay() {
 
   mainWindow.show();
   mainWindow.focus();
+
+  // Workaround for a known Electron/macOS bug: transparent windows can
+  // render as solid black until the compositor is forced to repaint (which
+  // is why dragging "revealed" the glass effect). A same-frame size nudge
+  // forces that repaint immediately on show, before the user ever sees it.
+  const [w, h] = mainWindow.getSize();
+  mainWindow.setSize(w, h + 1);
+  mainWindow.setSize(w, h);
+
   mainWindow.webContents.send('romanov:show');
 }
 
