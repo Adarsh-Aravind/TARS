@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en" data-platform="">
+<!--
+  ╔══════════════════════════════════════════════════════════════════╗
+  ║  ROMANOV — Command Overlay                                       ║
+  ║  Electron frameless window  ·  750 × 68 px                      ║
+  ║  macOS + Windows cross-platform                                  ║
+  ╚══════════════════════════════════════════════════════════════════╝
+-->
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+  <!--
+    CSP: tighten for production.
+    'unsafe-inline' is kept here only because Tailwind CDN injects styles inline.
+    When you switch to a local Tailwind build, remove 'unsafe-inline' and add your
+    nonce/hash. Also whitelist fonts.googleapis.com only if using the CDN font import.
+  -->
+  <meta
+    http-equiv="Content-Security-Policy"
+    content="
+      default-src 'self';
+      script-src  'self' https://cdn.tailwindcss.com 'unsafe-inline';
+      style-src   'self' https://fonts.googleapis.com 'unsafe-inline';
+      font-src    'self' https://fonts.gstatic.com    data:;
+      img-src     'self' data:;
+      connect-src 'self' http://127.0.0.1:8000;
+    "
+  />
+
+  <title>ROMANOV</title>
+
+  <!-- ① Tailwind CSS (utility classes) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- ② Custom design-system stylesheet -->
+  <link rel="stylesheet" href="styles.css" />
+
+  <!--
+    Tailwind theme extension  —  must run AFTER the CDN script loads.
+    Only extends; does not override anything in styles.css.
+  -->
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            mono: [
+              '"JetBrains Mono"', 'Consolas', 'Cascadia Code',
+              'SF Mono', 'Fira Code', 'Lucida Console', 'monospace'
+            ],
+          },
+        },
+      },
+    };
+  </script>
+</head>
+
+<!--
+  ╔══════════════════════════════════════════════════════════════════╗
+  ║  BODY                                                            ║
+  ║  Add class "preview-bg" when opening in a browser for preview.  ║
+  ║  Remove it for Electron — the window background will be         ║
+  ║  transparent (set `backgroundColor: '#00000000'` in             ║
+  ║  BrowserWindow options).                                         ║
+  ╚══════════════════════════════════════════════════════════════════╝
+-->
+<body class="preview-bg">
+
+  <!-- ═══════════════════════════════════════════════════════════════
+       ROMANOV PANEL  (750 × 68 px)
+       ═══════════════════════════════════════════════════════════════ -->
+  <div
+    id="romanov-panel"
+    role="dialog"
+    aria-label="ROMANOV Command Overlay"
+    aria-modal="true"
+  >
+
+    <!-- Glass shell wrapper -->
+    <div
+      class="glass-shell"
+      role="search"
+      aria-label="Command interface"
+    >
+
+      <!-- CRT scan-line texture (decorative) -->
+      <div class="scan-overlay" aria-hidden="true"></div>
+
+      <!-- ─────────────────────────────────────────────────────────
+           LEFT SECTION  ·  Telemetry / System Status
+           ───────────────────────────────────────────────────────── -->
+      <div class="section-left" aria-label="System telemetry">
+
+        <!-- Pulsing neon-cyan indicator -->
+        <div class="tel-wrap" aria-hidden="true">
+          <div class="tel-halo"></div>
+          <div class="tel-core"></div>
+        </div>
+
+        <!-- Status label stack -->
+        <div class="status-labels" aria-live="polite" aria-atomic="true">
+          <span
+            id="sys-status-label"
+            class="lbl-primary"
+            aria-label="System status"
+          >SYS.READY</span>
+          <span
+            id="op-status-label"
+            class="lbl-secondary"
+            aria-hidden="true"
+          >OP.IDLE</span>
+        </div>
+
+      </div><!-- /section-left -->
+
+      <!-- Vertical divider ① -->
+      <div class="v-divider left" aria-hidden="true"></div>
+
+      <!-- ─────────────────────────────────────────────────────────
+           CENTER SECTION  ·  Command Input
+           ───────────────────────────────────────────────────────── -->
+      <div class="section-center">
+        <input
+          id="romanov-input"
+          class="cmd-input"
+          type="text"
+          name="romanov-query"
+          autocomplete="off"
+          autocorrect="off"
+          autocapitalize="off"
+          spellcheck="false"
+          enterkeyhint="send"
+          placeholder="Awaiting automation query or terminal sequence..."
+          aria-label="Command input — press Enter to dispatch, Escape to dismiss"
+          aria-autocomplete="list"
+        />
+      </div><!-- /section-center -->
+
+      <!-- Vertical divider ② -->
+      <div class="v-divider right" aria-hidden="true"></div>
+
+      <!-- ─────────────────────────────────────────────────────────
+           RIGHT SECTION  ·  Network Bridge / Metadata
+           ───────────────────────────────────────────────────────── -->
+      <div class="section-right" aria-label="Backend tunnel status">
+
+        <!-- Meta label block -->
+        <div class="net-meta">
+          <span class="lbl-tunnel">BACKEND TUNNEL</span>
+          <span
+            id="net-addr-label"
+            class="lbl-addr"
+            aria-live="polite"
+          >127.0.0.1:8000</span>
+        </div>
+
+        <!-- Live connection dot -->
+        <div
+          id="conn-dot"
+          class="conn-dot"
+          role="status"
+          aria-label="Connection active"
+          title="Backend connection live"
+        ></div>
+
+      </div><!-- /section-right -->
+
+    </div><!-- /glass-shell -->
+
+  </div><!-- /romanov-panel -->
+
+  <!-- ③ Renderer logic (deferred — runs after DOM is parsed) -->
+  <script src="renderer.js" defer></script>
+
+</body>
+</html>

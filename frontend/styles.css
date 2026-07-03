@@ -1,0 +1,451 @@
+/* ═══════════════════════════════════════════════════════════════════
+   ROMANOV — Command Overlay  ·  styles.css
+   Cross-platform (macOS + Windows)  ·  Electron Chromium renderer
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* ── Google Font import (fallback to system mono on offline) ─────── */
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&display=swap');
+
+/* ── Design token surface ────────────────────────────────────────── */
+:root {
+  /* Colors */
+  --col-bg-tint:      rgba(10, 12, 18, 0.42);
+  --col-border:       rgba(255, 255, 255, 0.076);
+  --col-border-focus: rgba(34, 211, 238, 0.115);
+  --col-cyan:         #22d3ee;
+  --col-cyan-glow:    rgba(34, 211, 238, 0.12);
+  --col-emerald:      #10b981;
+  --col-emerald-glow: rgba(16, 185, 129, 0.58);
+  --col-text-primary: #e2e8f0;
+  --col-text-muted:   rgba(148, 163, 184, 0.30);
+  --col-label-cyan:   rgba(34, 211, 238, 0.52);
+  --col-label-slate:  rgba(71, 85, 105, 0.78);
+  --col-divider:      rgba(255, 255, 255, 0.10);
+
+  /* Typography — JetBrains Mono first; Consolas on Windows if font fails */
+  --font-mono: 'JetBrains Mono', 'Consolas', 'Cascadia Code', 'SF Mono',
+               'Fira Code', 'Lucida Console', monospace;
+
+  /* Spacing */
+  --panel-w: 750px;
+  --panel-h: 68px;
+  --panel-radius: 14px;
+  --px: 18px;
+  --section-gap: 16px;
+
+  /* Shadow layers (Neumorphic 6-layer stack) */
+  --shadow-idle:
+    0  0   0    1px  rgba(0, 0, 0, 0.58),
+    0  4px  28px -4px rgba(0, 0, 0, 0.70),
+    0 14px  60px -8px rgba(0, 0, 0, 0.52),
+    inset 0  1px  0        rgba(255, 255, 255, 0.092),
+    inset 0 -1px  0        rgba(0, 0, 0, 0.38),
+    inset 0  0   30px      rgba(34, 211, 238, 0.024);
+
+  --shadow-active:
+    0  0   0    1px  rgba(0, 0, 0, 0.58),
+    0  4px  28px -4px rgba(0, 0, 0, 0.70),
+    0 14px  60px -8px rgba(0, 0, 0, 0.52),
+    inset 0  1px  0        rgba(255, 255, 255, 0.092),
+    inset 0 -1px  0        rgba(0, 0, 0, 0.38),
+    inset 0  0   30px      rgba(34, 211, 238, 0.038),
+    0  0   48px  -8px      rgba(34, 211, 238, 0.115);
+}
+
+/* ── Hard reset ──────────────────────────────────────────────────── */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+/* ── Root / body ─────────────────────────────────────────────────── */
+html {
+  /* Windows DPI scaling guard */
+  -ms-text-size-adjust: 100%;
+  -webkit-text-size-adjust: 100%;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  /* Windows ClearType */
+  -moz-osx-font-smoothing: grayscale;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  /* Electron: truly transparent window background */
+  background: transparent;
+  font-family: var(--font-mono);
+}
+
+/* ── Preview mode (browser-only — remove body class in Electron) ─── */
+body.preview-bg {
+  background: radial-gradient(ellipse at 30% 40%, #1a2744 0%, #0a0c12 65%);
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   KEYFRAME ANIMATIONS
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* Core telemetry dot pulse */
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1;    transform: scale(1);    }
+  50%       { opacity: 0.28; transform: scale(0.66); }
+}
+
+/* Expanding halo ring */
+@keyframes halo-ring {
+  0%   { transform: scale(1);    opacity: 0.60; }
+  100% { transform: scale(2.85); opacity: 0;    }
+}
+
+/* Organic CRT character flicker */
+@keyframes flicker {
+  0%,  88%, 91%, 95%, 100% { opacity: 1;    }
+  89%                       { opacity: 0.52; }
+  90%                       { opacity: 0.90; }
+  92%                       { opacity: 0.70; }
+  96%                       { opacity: 0.60; }
+}
+
+/* Panel entry slide-in */
+@keyframes slide-in {
+  0%   { opacity: 0; transform: translateY(-10px) scaleX(0.96); }
+  100% { opacity: 1; transform: translateY(0px)   scaleX(1);    }
+}
+
+/* Connection dot (offset pulse) */
+@keyframes pulse-conn {
+  0%, 100% { opacity: 1;    transform: scale(1);    }
+  50%       { opacity: 0.30; transform: scale(0.70); }
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   PANEL ROOT
+   ═══════════════════════════════════════════════════════════════════ */
+#romanov-panel {
+  width:  var(--panel-w);
+  height: var(--panel-h);
+  animation: slide-in 0.36s cubic-bezier(0.22, 1, 0.36, 1) both;
+
+  /* Electron drag region (whole panel draggable by default) */
+  -webkit-app-region: drag;
+  app-region: drag;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   GLASS SHELL  —  Glassmorphism 2.0 + Neumorphic depth
+   ═══════════════════════════════════════════════════════════════════ */
+.glass-shell {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  padding: 0 var(--px);
+  gap: 0;
+
+  /* Dark tint */
+  background: var(--col-bg-tint);
+
+  /* Ultra-deep blur — works in Electron Chromium on both platforms */
+  backdrop-filter:         blur(44px) saturate(220%) brightness(0.86);
+  -webkit-backdrop-filter: blur(44px) saturate(220%) brightness(0.86);
+
+  /* Light-capture stroke */
+  border: 1px solid var(--col-border);
+  border-radius: var(--panel-radius);
+
+  /* Neumorphic shadow stack */
+  box-shadow: var(--shadow-idle);
+
+  transition: box-shadow 0.45s ease, border-color 0.45s ease;
+}
+
+/* Focused state — cyan bloom activates */
+.glass-shell:focus-within {
+  border-color: var(--col-border-focus);
+  box-shadow:   var(--shadow-active);
+}
+
+/* Film-grain noise layer (SVG fractal, data URI — no network request) */
+.glass-shell::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 256 256'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.82' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23g)' opacity='0.048'/%3E%3C/svg%3E");
+  background-size: 120px 120px;
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* CRT horizontal scan-line texture */
+.scan-overlay {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: repeating-linear-gradient(
+    to bottom,
+    transparent      0px,
+    transparent      2px,
+    rgba(0,0,0,0.028) 2px,
+    rgba(0,0,0,0.028) 4px
+  );
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* All direct content above grain/scan layers */
+.glass-shell > * {
+  position: relative;
+  z-index: 2;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   LAYOUT SECTIONS
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* Left: telemetry block */
+.section-left {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 10px;
+  padding-right: var(--section-gap);
+  /* Override drag so clicks register on label */
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+/* Center: input wrapper */
+.section-center {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+/* Right: network metadata */
+.section-right {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 10px;
+  padding-left: var(--section-gap);
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+/* Gradient vertical divider */
+.v-divider {
+  width: 1px;
+  align-self: stretch;
+  flex-shrink: 0;
+  margin-top: 12px;
+  margin-bottom: 12px;
+  background: linear-gradient(
+    to bottom,
+    transparent         0%,
+    var(--col-divider) 20%,
+    rgba(255,255,255,0.13) 50%,
+    var(--col-divider) 80%,
+    transparent        100%
+  );
+}
+
+.v-divider.left  { margin-right: var(--section-gap); }
+.v-divider.right { margin-left:  var(--section-gap); }
+
+/* ═══════════════════════════════════════════════════════════════════
+   LEFT — TELEMETRY DOT
+   ═══════════════════════════════════════════════════════════════════ */
+.tel-wrap {
+  position: relative;
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.tel-core {
+  position: relative;
+  z-index: 2;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--col-cyan);
+  box-shadow:
+    0 0  7px 1px rgba(34, 211, 238, 0.72),
+    0 0 16px 3px rgba(34, 211, 238, 0.30);
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+
+.tel-halo {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 1.5px solid rgba(34, 211, 238, 0.52);
+  animation: halo-ring 2s ease-out infinite;
+}
+
+/* ── Status label stack ──────────────────────────────────────────── */
+.status-labels {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  min-width: 62px;
+}
+
+.lbl-primary {
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+  font-weight: 600;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--col-label-cyan);
+  animation: flicker 9s linear infinite;
+  /* Windows: prevent sub-pixel bleed on small text */
+  -webkit-font-smoothing: antialiased;
+}
+
+.lbl-secondary {
+  font-family: var(--font-mono);
+  font-size: 7px;
+  font-weight: 500;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--col-label-slate);
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   CENTER — COMMAND INPUT
+   ═══════════════════════════════════════════════════════════════════ */
+.cmd-input {
+  /* Strip all native chrome */
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  border: none;
+  outline: none;
+  box-shadow: none;
+
+  /* Caret */
+  caret-color: var(--col-cyan);
+
+  /* Text */
+  color: var(--col-text-primary);
+  font-family: var(--font-mono);
+  font-size: 13.5px;
+  font-weight: 400;
+  letter-spacing: 0.012em;
+
+  /* Layout */
+  width: 100%;
+  height: 100%;
+  display: block;
+
+  /* Windows: kill the blue outline and autofill background */
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+/* Placeholder — low contrast idle state */
+.cmd-input::placeholder {
+  color: var(--col-text-muted);
+  font-weight: 300;
+  letter-spacing: 0.004em;
+  transition: color 0.35s ease;
+}
+
+.cmd-input:focus::placeholder {
+  color: rgba(148, 163, 184, 0.15);
+}
+
+/* Windows: kill Edge/IE clear button & password reveal */
+.cmd-input::-ms-clear,
+.cmd-input::-ms-reveal {
+  display: none;
+}
+
+/* Windows / Chrome: kill autofill yellow background */
+.cmd-input:-webkit-autofill,
+.cmd-input:-webkit-autofill:focus {
+  -webkit-box-shadow: 0 0 0 1000px rgba(10,12,18,0) inset !important;
+  -webkit-text-fill-color: var(--col-text-primary) !important;
+  transition: background-color 99999s ease;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   RIGHT — NETWORK BRIDGE
+   ═══════════════════════════════════════════════════════════════════ */
+.net-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 2px;
+}
+
+.lbl-tunnel {
+  font-family: var(--font-mono);
+  font-size: 7.5px;
+  font-weight: 500;
+  letter-spacing: 0.20em;
+  text-transform: uppercase;
+  color: rgba(71, 85, 105, 0.72);
+}
+
+.lbl-addr {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.055em;
+  color: var(--col-emerald);
+  font-variant-numeric: tabular-nums;
+  text-shadow:
+    0 0  8px var(--col-emerald-glow),
+    0 0 22px rgba(16, 185, 129, 0.22);
+}
+
+/* Live connection dot */
+.conn-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--col-emerald);
+  box-shadow: 0 0 5px 1.5px rgba(16, 185, 129, 0.85);
+  animation: pulse-conn 2.6s ease-in-out infinite;
+  animation-delay: 0.7s;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   SCROLLBAR SUPPRESSION  (Windows shows scrollbars by default)
+   ═══════════════════════════════════════════════════════════════════ */
+::-webkit-scrollbar { display: none; }
+* { scrollbar-width: none; }
+
+/* ═══════════════════════════════════════════════════════════════════
+   WINDOWS HIGH-CONTRAST MODE  (accessibility override guard)
+   ═══════════════════════════════════════════════════════════════════ */
+@media (forced-colors: active) {
+  .glass-shell { border: 1px solid ButtonText; }
+  .tel-core     { background: Highlight; }
+  .lbl-addr     { color: Highlight; }
+  .cmd-input    { color: ButtonText; }
+}
