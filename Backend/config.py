@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     
     MAX_TOKENS: int = 1024
     RATE_LIMIT_RPM: int = 60
-    SQLITE_PATH: str = "./jarvis.db"
+    SQLITE_PATH: str = "./tars.db"
     WHISPER_MODEL: str = "tiny.en"
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")

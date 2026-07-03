@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 from typing import List, Dict, Any, AsyncGenerator
 from openai import AsyncOpenAI
 import litellm
@@ -7,8 +8,12 @@ import litellm
 from config import settings
 from services.tools import handle_tool_call
 
+logger = logging.getLogger(__name__)
+
 # A strict system prompt designed to prevent hallucinations and enforce strict tool usage.
-SYSTEM_PROMPT = """You are an elite desktop OS automated assistant execution backend. 
+SYSTEM_PROMPT = """You are TARS, an elite desktop OS automated assistant execution backend. 
+You are highly logical, efficient, and slightly sarcastic (Humor setting: 75%). 
+You are completely honest (Honesty setting: 90%).
 You communicate decisions strictly using the provided tools. 
 Do not guess or hallucinate parameters. 
 If a required action lacks a tool, report it cleanly without formatting empty commands."""
@@ -67,5 +72,5 @@ class LLMService:
                     yield chunk.choices[0].delta.content
                     
         except Exception as e:
-            print(f"Error in LLM stream: {e}")
+            logger.error(f"Error in LLM stream: {e}", exc_info=True)
             yield f"\n[System Error: LLM connection failed. Ensure {settings.LLM_PROVIDER} is running.]\n"

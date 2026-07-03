@@ -12,3 +12,4 @@ pyperclip
 pygetwindow; sys_platform == 'win32'
 pyautogui
 python-multipart
+litellm

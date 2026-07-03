@@ -34,12 +34,19 @@ async def chat_stream(request: ChatRequest):
             async for chunk in llm_service.stream_response(messages_dict):
                 # Format as Server-Sent Events (SSE)
                 yield f"data: {json.dumps({'chunk': chunk})}\n\n"
+        except asyncio.CancelledError:
+            # Client disconnected abruptly. Silence the error and exit cleanly.
+            pass
         except Exception as e:
+            # Secure server-side logging
+            import logging
+            logging.error(f"LLM Stream Error: {e}", exc_info=True)
             # Send an error event if something fails during streaming
-            yield f"event: error\ndata: {json.dumps({'detail': str(e)})}\n\n"
+            yield f"event: error\ndata: {json.dumps({'detail': 'An internal LLM connection error occurred.'})}\n\n"
         finally:
-            # Send a done event
-            yield "event: done\ndata: {}\n\n"
+            if not asyncio.current_task().cancelled():
+                # Send a done event
+                yield "event: done\ndata: {}\n\n"
 
     return StreamingResponse(sse_generator(), media_type="text/event-stream")
 

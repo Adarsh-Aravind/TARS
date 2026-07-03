@@ -20,8 +20,8 @@ async def lifespan(app: FastAPI):
     pass
 
 app = FastAPI(
-    title="Jarvis Backend",
-    description="Backend for the Jarvis cross-platform desktop AI assistant",
+    title="TARS Backend",
+    description="Backend for the TARS cross-platform desktop AI assistant",
     version="1.0.0",
     lifespan=lifespan,
 )
