@@ -246,9 +246,11 @@ export default function App() {
     <div 
       className="w-full h-full flex items-center justify-center bg-transparent"
       onKeyDown={handleKeyDown}
+      onClick={handleClose}
     >
       <motion.div
         layout
+        onClick={(e) => e.stopPropagation()}
         initial={{ opacity: 0, scale: 0.9 }}
         animate={
           uiState === 'TEXT_INPUT'

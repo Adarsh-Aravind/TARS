@@ -40,6 +40,10 @@ function createWindow() {
     }
   });
 
+  win.on('blur', () => {
+    win.hide();
+  });
+
   ipcMain.on('dispatch-query', (event, query) => {
     console.log(`Dispatching query: ${query}`);
     setTimeout(() => {
