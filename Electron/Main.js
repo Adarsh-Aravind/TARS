@@ -1,4 +1,4 @@
-// ROMANOV — Electron main process
+// TARS — Electron main process
 // Frameless, transparent, always-on-top overlay that pops up on Alt+Space
 // and hides on blur / Escape — this is what makes it behave like Siri
 // instead of a static webpage.
@@ -120,7 +120,6 @@ function showOverlay() {
 
   mainWindow.show();
   mainWindow.focus();
-
   // Workaround for a known Electron/macOS bug: transparent windows can
   // render as solid black until the compositor is forced to repaint (which
   // is why dragging "revealed" the glass effect). A same-frame size nudge
@@ -129,12 +128,12 @@ function showOverlay() {
   mainWindow.setSize(w, h + 1);
   mainWindow.setSize(w, h);
 
-  mainWindow.webContents.send('romanov:show');
+  mainWindow.webContents.send('tars:show');
 }
 
 function hideOverlay() {
   if (!mainWindow || !mainWindow.isVisible()) return;
-  mainWindow.webContents.send('romanov:hide');
+  mainWindow.webContents.send('tars:hide');
   mainWindow.hide();
 }
 
@@ -152,16 +151,20 @@ function toggleOverlay() {
 // ---------------------------------------------------------------------------
 function registerIpcHandlers() {
   // renderer -> main: user submitted a command
-  ipcMain.on('romanov:dispatch', (_event, query) => {
+  ipcMain.on('tars:dispatch', (_event, query) => {
     handleDispatch(query);
   });
 
   // renderer -> main: explicit hide request (e.g. Escape key)
-  ipcMain.on('romanov:hide', () => {
+  ipcMain.on('tars:hide', () => {
     hideOverlay();
   });
+  
+  ipcMain.on('tars:show-overlay', () => {
+    showOverlay();
+  });
 
-  ipcMain.on('romanov:resize-window', (event, height) => {
+  ipcMain.on('tars:resize-window', (event, height) => {
     if (mainWindow) {
       mainWindow.setContentSize(WINDOW_WIDTH, height);
     }
@@ -170,7 +173,7 @@ function registerIpcHandlers() {
 
 async function handleDispatch(query) {
   if (!mainWindow) return;
-  mainWindow.webContents.send('romanov:status', 'RUNNING');
+  mainWindow.webContents.send('tars:status', 'RUNNING');
 
   try {
     const response = await fetch(`http://${BACKEND_HOST}:${BACKEND_PORT}/api/v1/chat/stream`, {
@@ -201,9 +204,9 @@ async function handleDispatch(query) {
           try {
             const data = JSON.parse(dataStr);
             if (data.chunk) {
-              mainWindow.webContents.send('romanov:reply-chunk', data.chunk);
+              mainWindow.webContents.send('tars:reply-chunk', data.chunk);
             } else if (data.detail) {
-              mainWindow.webContents.send('romanov:error', data.detail);
+              mainWindow.webContents.send('tars:error', data.detail);
             }
           } catch (e) {
             // ignore JSON parse errors on incomplete chunks if any
@@ -212,32 +215,32 @@ async function handleDispatch(query) {
       }
     }
 
-    mainWindow.webContents.send('romanov:reply-end');
-    mainWindow.webContents.send('romanov:status', 'DONE');
+    mainWindow.webContents.send('tars:reply-end');
+    mainWindow.webContents.send('tars:status', 'DONE');
   } catch (err) {
-    mainWindow.webContents.send('romanov:status', 'ERROR');
-    mainWindow.webContents.send('romanov:error', String(err.message || err));
+    mainWindow.webContents.send('tars:status', 'ERROR');
+    mainWindow.webContents.send('tars:error', String(err.message || err));
   }
 }
 
 // ---------------------------------------------------------------------------
-// Backend connectivity polling -> 'romanov:connected' + 'romanov:network'
+// Backend connectivity polling -> 'tars:connected' + 'tars:network'
 // ---------------------------------------------------------------------------
 function sendNetworkStatus() {
   if (!mainWindow) return;
   // renderer.js does `connLabel.textContent = addr` — must be a plain string,
   // not an object.
-  mainWindow.webContents.send('romanov:network', `${BACKEND_HOST}:${BACKEND_PORT}`);
+  mainWindow.webContents.send('tars:network', `${BACKEND_HOST}:${BACKEND_PORT}`);
 }
 
 function pollBackendHealth() {
   const req = http.get(BACKEND_HEALTH_URL, { timeout: 2000 }, (res) => {
     const connected = res.statusCode >= 200 && res.statusCode < 300;
-    if (mainWindow) mainWindow.webContents.send('romanov:connected', connected);
+    if (mainWindow) mainWindow.webContents.send('tars:connected', connected);
     res.resume();
   });
   req.on('error', () => {
-    if (mainWindow) mainWindow.webContents.send('romanov:connected', false);
+    if (mainWindow) mainWindow.webContents.send('tars:connected', false);
   });
   req.on('timeout', () => req.destroy());
 }
@@ -248,9 +251,9 @@ function pollBackendHealth() {
 function createTray() {
   const icon = nativeImage.createEmpty(); // swap in a real .png/.ico asset
   tray = new Tray(icon.isEmpty() ? nativeImage.createEmpty() : icon);
-  tray.setToolTip('ROMANOV');
+  tray.setToolTip('TARS');
   const menu = Menu.buildFromTemplate([
-    { label: 'Show ROMANOV', click: showOverlay },
+    { label: 'Show TARS', click: showOverlay },
     { type: 'separator' },
     {
       label: 'Quit',
@@ -288,7 +291,7 @@ app.whenReady().then(() => {
 
   const registered = globalShortcut.register(HOTKEY, toggleOverlay);
   if (!registered) {
-    console.error(`[ROMANOV] Failed to register global shortcut: ${HOTKEY}`);
+    console.error(`[TARS] Failed to register global shortcut: ${HOTKEY}`);
   }
 
   pollBackendHealth();

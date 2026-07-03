@@ -1,5 +1,5 @@
 {
-  "name": "romanov",
+  "name": "tars",
   "version": "0.1.0",
   "description": "Cross-platform frameless AI assistant overlay",
   "main": "main.js",
@@ -16,8 +16,8 @@
     "electron-builder": "^24.13.3"
   },
   "build": {
-    "appId": "com.romanov.overlay",
-    "productName": "ROMANOV",
+    "appId": "com.tars.overlay",
+    "productName": "TARS",
     "files": [
       "main.js",
       "preload.js",

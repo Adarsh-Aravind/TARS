@@ -6,8 +6,18 @@ from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 
 from services.llm import LLMService
+from services.voice import voice_engine
 
 router = APIRouter(tags=["chat"])
+
+@router.on_event("startup")
+async def startup_event():
+    # Start the background wake word listener
+    voice_engine.start()
+
+@router.on_event("shutdown")
+async def shutdown_event():
+    voice_engine.stop()
 
 class ChatMessage(BaseModel):
     role: str
@@ -65,12 +75,54 @@ async def chat_stream(request: ChatRequest):
 async def transcribe_audio():
     """
     Stub for audio transcription (e.g., local Faster-Whisper).
-    """
-    return {"status": "stub", "message": "Transcription endpoint not fully implemented yet."}
+import edge_tts
+import speech_recognition as sr
 
-@router.post("/audio/synthesize")
-async def synthesize_audio():
+@router.get("/events")
+async def sse_events():
     """
-    Stub for audio synthesis (e.g., Edge-TTS).
+    Streams system events to the frontend (e.g. wakeup).
     """
-    return {"status": "stub", "message": "Synthesis endpoint not fully implemented yet."}
+    async def event_stream():
+        while True:
+            if voice_engine.wakeup_event.is_set():
+                voice_engine.wakeup_event.clear()
+                yield "event: wakeup\ndata: {}\n\n"
+            await asyncio.sleep(0.5)
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+@router.get("/audio/listen")
+async def listen_for_command():
+    """
+    Called by frontend when woken up. Records for a few seconds and transcribes.
+    """
+    voice_engine.stop()
+    text = ""
+    try:
+        # We need a new recognizer instance for synchronous listening
+        recognizer = sr.Recognizer()
+        with sr.Microphone() as source:
+            # Short timeout to avoid hanging if they didn't say anything
+            audio = recognizer.listen(source, timeout=5, phrase_time_limit=10)
+            text = recognizer.recognize_google(audio)
+    except Exception as e:
+        import logging
+        logging.error(f"Error during command listening: {e}")
+    finally:
+        voice_engine.start()
+        
+    return {"text": text}
+
+@router.get("/audio/synthesize")
+async def synthesize_audio(text: str, voice: str = "en-GB-RyanNeural"):
+    """
+    Synthesize audio using Edge-TTS and stream it back directly.
+    """
+    communicate = edge_tts.Communicate(text, voice)
+    
+    async def audio_stream():
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                yield chunk["data"]
+                
+    return StreamingResponse(audio_stream(), media_type="audio/mpeg")

@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════════════════════════════════
-   ROMANOV — Design System
+   TARS — Design System
    Neumorphism 2.0 × Glassmorphism · Minimal · Siri-style
    ═══════════════════════════════════════════════════════════════════ */
 
@@ -82,7 +82,7 @@ body.preview-bg {
 }
 
 /* ── Shell wrapper ─────────────────────────────────────────────── */
-#romanov-shell {
+#tars-shell {
   width: 680px;
 
   /* Neumorphic raised surface */
@@ -397,7 +397,7 @@ body.preview-bg {
 .hidden { display: none !important; }
 
 /* ── Input focused state — subtle accent glow ──────────────────── */
-#romanov-shell:focus-within .glass-card {
+#tars-shell:focus-within .glass-card {
   border-color: rgba(129, 140, 248, 0.15);
   box-shadow:
     inset 0  1px 0   rgba(255,255,255,0.09),
@@ -405,7 +405,7 @@ body.preview-bg {
     0 0 0 1px var(--accent-dim);
 }
 
-#romanov-shell:focus-within .input-icon {
+#tars-shell:focus-within .input-icon {
   color: var(--accent);
 }
 

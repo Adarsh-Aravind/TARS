@@ -1,4 +1,4 @@
-# ROMANOV
+# TARS
 
 > A shared repo among us friends to learn by interacting and building together.
 
@@ -37,7 +37,7 @@ When the AI replies, the UI seamlessly scales downward to display a conversation
 ## ✦ Architecture
 
 ```
-ROMANOV/
+TARS/
 ├── Electron/
 │   ├── Main.js        ← Main process (Tray, Window resizing, SSE Parsing)
 │   ├── Preload.js     ← Context bridge API for secure IPC
@@ -82,13 +82,13 @@ npm start
 
 | Channel | Direction | Payload | Description |
 |---|---|---|---|
-| `romanov:dispatch` | renderer → main | `string` | User-submitted command query |
-| `romanov:hide` | renderer → main | — | Request to hide the overlay window |
-| `romanov:resize-window` | renderer → main | `integer` | Resizes the transparent shell |
-| `romanov:show` | main → renderer | — | Overlay shown — re-focus input |
-| `romanov:status` | main → renderer | `string` (key) | Status key: `IDLE` `RUNNING` `DONE` `ERROR` |
-| `romanov:reply-chunk` | main → renderer | `string` | A live text token from the LLM |
-| `romanov:reply-end` | main → renderer | — | Marks the end of a response stream |
+| `tars:dispatch` | renderer → main | `string` | User-submitted command query |
+| `tars:hide` | renderer → main | — | Request to hide the overlay window |
+| `tars:resize-window` | renderer → main | `integer` | Resizes the transparent shell |
+| `tars:show` | main → renderer | — | Overlay shown — re-focus input |
+| `tars:status` | main → renderer | `string` (key) | Status key: `IDLE` `RUNNING` `DONE` `ERROR` |
+| `tars:reply-chunk` | main → renderer | `string` | A live text token from the LLM |
+| `tars:reply-end` | main → renderer | — | Marks the end of a response stream |
 
 ---
 
@@ -96,7 +96,7 @@ npm start
 
 | Key | Action |
 |---|---|
-| `Alt+Space` | Global toggle: Show/Hide ROMANOV from anywhere |
+| `Alt+Space` | Global toggle: Show/Hide TARS from anywhere |
 | `Enter` | Dispatch command to backend |
 | `Escape` | Clear input, hide reply box, and hide overlay |
 | `↑` / `↓` | Cycle command history (last 50) |

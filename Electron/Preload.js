@@ -1,4 +1,4 @@
-// ROMANOV — preload script
+// TARS — preload script
 // Runs in an isolated context and exposes a minimal, safe API to the
 // renderer via contextBridge. This is what renderer.js's "preload API"
 // branch talks to when contextIsolation: true.
@@ -13,28 +13,29 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // renderer -> main
   dispatch: (query) => {
     if (typeof query !== 'string') return;
-    ipcRenderer.send('romanov:dispatch', query);
+    ipcRenderer.send('tars:dispatch', query);
   },
-  hideOverlay: () => ipcRenderer.send('romanov:hide'),
-  resizeWindow: (height) => ipcRenderer.send('romanov:resize-window', height),
+  hideOverlay: () => ipcRenderer.send('tars:hide'),
+  showOverlay: () => ipcRenderer.send('tars:show-overlay'),
+  resizeWindow: (height) => ipcRenderer.send('tars:resize-window', height),
 
   // main -> renderer
   onStatusUpdate: (callback) =>
-    ipcRenderer.on('romanov:status', (_event, key) => callback(key)),
+    ipcRenderer.on('tars:status', (_event, key) => callback(key)),
   onNetworkUpdate: (callback) =>
-    ipcRenderer.on('romanov:network', (_event, addr) => callback(addr)),
+    ipcRenderer.on('tars:network', (_event, addr) => callback(addr)),
   onConnectionState: (callback) =>
-    ipcRenderer.on('romanov:connected', (_event, live) => callback(live)),
+    ipcRenderer.on('tars:connected', (_event, live) => callback(live)),
   onOverlayShow: (callback) =>
-    ipcRenderer.on('romanov:show', () => callback()),
+    ipcRenderer.on('tars:show', () => callback()),
 
   // extras (optional — only used if you wire live token streaming)
   onReplyChunk: (callback) =>
-    ipcRenderer.on('romanov:reply-chunk', (_event, chunk) => callback(chunk)),
+    ipcRenderer.on('tars:reply-chunk', (_event, chunk) => callback(chunk)),
   onReplyEnd: (callback) =>
-    ipcRenderer.on('romanov:reply-end', () => callback()),
+    ipcRenderer.on('tars:reply-end', () => callback()),
   onError: (callback) =>
-    ipcRenderer.on('romanov:error', (_event, message) => callback(message)),
+    ipcRenderer.on('tars:error', (_event, message) => callback(message)),
 });
 
 // Fix: overlay.html ships with <body class="preview-bg"> for browser

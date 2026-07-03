@@ -1,5 +1,5 @@
 /**
- * ROMANOV — renderer.js
+ * TARS — renderer.js
  * Electron renderer-process script · macOS + Windows
  *
  * Responsibilities:
@@ -13,13 +13,13 @@
  *  8. IPC bridge — works with both contextIsolation modes
  *
  * NOTE: Show/hide is handled entirely by Electron (globalShortcut + BrowserWindow).
- *       We only react to the 'romanov:show' event to re-focus the input.
+ *       We only react to the 'tars:show' event to re-focus the input.
  */
 
 'use strict';
 
 /* ── DOM refs ──────────────────────────────────────────────────── */
-const input       = document.getElementById('romanov-input');
+const input       = document.getElementById('tars-input');
 const statusDot   = document.getElementById('status-dot');
 const statusText  = document.getElementById('status-text');
 const connDot     = document.getElementById('conn-dot');
@@ -106,12 +106,12 @@ function dispatchQuery(query) {
   // IPC bridge — raw ipcRenderer (nodeIntegration: true)
   try {
     const { ipcRenderer } = require('electron');
-    ipcRenderer.send('romanov:dispatch', query);
+    ipcRenderer.send('tars:dispatch', query);
     return;
   } catch (_) { /* not in Electron */ }
 
   // Browser dev: log
-  console.log('[ROMANOV] dispatch →', query);
+  console.log('[TARS] dispatch →', query);
 }
 
 /* ── Hide overlay ──────────────────────────────────────────────── */
@@ -131,12 +131,12 @@ function hideOverlay() {
 
   try {
     const { ipcRenderer } = require('electron');
-    ipcRenderer.send('romanov:hide');
+    ipcRenderer.send('tars:hide');
     return;
   } catch (_) { /* not in Electron */ }
 
   // Browser preview: just clear
-  console.log('[ROMANOV] hide requested');
+  console.log('[TARS] hide requested');
 }
 
 /* ── Keyboard handler ───────────────────────────────────────────── */
@@ -146,6 +146,7 @@ input.addEventListener('keydown', (e) => {
     case 'Enter': {
       const query = input.value.trim();
       if (query) {
+        window.isVoiceMode = false;
         dispatchQuery(query);
         input.value = '';
       }
@@ -202,7 +203,7 @@ function startListening() {
     window.SpeechRecognition || window.webkitSpeechRecognition;
 
   if (!SpeechRecognition) {
-    console.warn('[ROMANOV] Speech recognition not supported.');
+    console.warn('[TARS] Speech recognition not supported.');
     return;
   }
 
@@ -228,14 +229,17 @@ function startListening() {
     if (e.results[e.results.length - 1].isFinal) {
       stopListening();
       if (transcript.trim()) {
-        dispatchQuery(transcript.trim());
-        input.value = '';
+        // Disabled native auto-dispatch for now since we're building a Python wake word engine.
+        // If we want to use the mic button for dictation, we can uncomment this:
+        // window.isVoiceMode = true;
+        // dispatchQuery(transcript.trim());
+        // input.value = '';
       }
     }
   };
 
   recognition.onerror = (e) => {
-    console.warn('[ROMANOV] Voice error:', e.error);
+    console.warn('[TARS] Voice error:', e.error);
     stopListening();
   };
 
@@ -261,11 +265,70 @@ micBtn.addEventListener('click', () => {
   if (isListening) {
     stopListening();
   } else {
-    startListening();
+    // startListening(); // Old web speech API
+    startListeningFromBackend();
   }
 });
 
+async function startListeningFromBackend() {
+  isListening = true;
+  micBtn.classList.add('listening');
+  setStatus('LISTENING');
+  input.placeholder = 'Listening via TARS voice engine…';
+  input.value = '';
+
+  try {
+    const res = await fetch('http://127.0.0.1:8000/api/v1/audio/listen');
+    if (res.ok) {
+      const data = await res.json();
+      const transcript = data.text;
+      
+      if (transcript && transcript.trim()) {
+        input.value = transcript;
+        window.isVoiceMode = true;
+        dispatchQuery(transcript.trim());
+        input.value = '';
+      }
+    }
+  } catch (e) {
+    console.error('Failed to listen from backend', e);
+  } finally {
+    isListening = false;
+    micBtn.classList.remove('listening');
+    if (statusDot.classList.contains('listening')) setStatus('IDLE');
+    input.placeholder = 'Ask anything or give a command…';
+  }
+}
+
+/* ── Wake word SSE Listener ─────────────────────────────────────── */
+const eventSource = new EventSource('http://127.0.0.1:8000/api/v1/events');
+eventSource.addEventListener('wakeup', () => {
+  if (window.electronAPI?.showOverlay) {
+    window.electronAPI.showOverlay();
+  }
+  // Briefly wait for overlay to appear before recording
+  setTimeout(() => {
+    if (!isListening) startListeningFromBackend();
+  }, 300);
+});
+
 /* ── IPC listeners ──────────────────────────────────────────────── */
+
+let sentenceBuffer = "";
+let audioQueue = [];
+let isPlaying = false;
+
+function playNextAudio() {
+  if (isPlaying || audioQueue.length === 0) return;
+  isPlaying = true;
+  const url = audioQueue.shift();
+  const audio = new Audio(url);
+  audio.onended = () => {
+    isPlaying = false;
+    playNextAudio();
+  };
+  audio.play();
+}
 
 // Preload API pattern (contextIsolation: true)
 if (window.electronAPI) {
@@ -287,16 +350,40 @@ if (window.electronAPI) {
       replyContent.textContent += chunk;
       replyBox.scrollTop = replyBox.scrollHeight;
     }
+
+    if (window.isVoiceMode) {
+      sentenceBuffer += chunk;
+      // Simple sentence boundary detection
+      if (/[.!?]\s+$/.test(sentenceBuffer) || /\n/.test(sentenceBuffer)) {
+        const textToSpeak = sentenceBuffer.trim();
+        sentenceBuffer = "";
+        
+        if (textToSpeak) {
+           const url = `http://127.0.0.1:8000/api/v1/audio/synthesize?text=${encodeURIComponent(textToSpeak)}`;
+           audioQueue.push(url);
+           playNextAudio();
+        }
+      }
+    }
+  });
+  
+  window.electronAPI.onReplyEnd?.(() => {
+    if (window.isVoiceMode && sentenceBuffer.trim()) {
+      const url = `http://127.0.0.1:8000/api/v1/audio/synthesize?text=${encodeURIComponent(sentenceBuffer.trim())}`;
+      audioQueue.push(url);
+      playNextAudio();
+      sentenceBuffer = "";
+    }
   });
 }
 
 // Raw ipcRenderer (nodeIntegration: true)
 try {
   const { ipcRenderer } = require('electron');
-  ipcRenderer.on('romanov:status',    (_, key)  => setStatus(key));
-  ipcRenderer.on('romanov:network',   (_, addr) => setNetworkAddress(addr));
-  ipcRenderer.on('romanov:connected', (_, live) => setConnected(live));
-  ipcRenderer.on('romanov:show', () => {
+  ipcRenderer.on('tars:status',    (_, key)  => setStatus(key));
+  ipcRenderer.on('tars:network',   (_, addr) => setNetworkAddress(addr));
+  ipcRenderer.on('tars:connected', (_, live) => setConnected(live));
+  ipcRenderer.on('tars:show', () => {
     setStatus('IDLE');
     requestAnimationFrame(() => input.focus());
   });
