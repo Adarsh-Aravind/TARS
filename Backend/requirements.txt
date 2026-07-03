@@ -1,0 +1,14 @@
+fastapi
+uvicorn[standard]
+pydantic
+pydantic-settings
+aiosqlite
+httpx
+openai
+google-generativeai
+edge-tts
+faster-whisper
+pyperclip
+pygetwindow; sys_platform == 'win32'
+pyautogui
+python-multipart
