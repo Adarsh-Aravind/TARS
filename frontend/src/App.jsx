@@ -1,11 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Mic, Send, Wifi, WifiOff, X, ArrowLeft } from 'lucide-react';
-import Globe from './Globe';
 
 export default function App() {
-  const [isExpanded, setIsExpanded] = useState(false);
-  const [status, setStatus] = useState('IDLE'); // IDLE, RUNNING, DONE, ERROR, LISTENING
+  const [uiState, setUiState] = useState('HIDDEN'); 
+  const [status, setStatus] = useState('IDLE'); 
   const [isConnected, setIsConnected] = useState(false);
   const [backendAddress, setBackendAddress] = useState('127.0.0.1:8000');
   const [inputText, setInputText] = useState('');
@@ -15,164 +14,206 @@ export default function App() {
 
   const inputRef = useRef(null);
   const replyEndRef = useRef(null);
-  const recognitionRef = useRef(null);
+  
+  // No longer using webkitSpeechRecognition - relying on backend for listening
+  
+  const speakText = (text) => {
+    // Strip out <display>...</display> tags from spoken text
+    const cleanText = text.replace(/<display>[\s\S]*?<\/display>/g, '').trim();
+    if (!cleanText) return;
+    
+    // Stop any existing speech before starting new sentence
+    // (Optional: can be removed if you want seamless continuous talking, 
+    // but useful if user interrupts)
+    const utterance = new SpeechSynthesisUtterance(cleanText);
+    window.speechSynthesis.speak(utterance);
+  };
 
-  // Initialize Speech Recognition
-  useEffect(() => {
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (SpeechRecognition) {
-      const rec = new SpeechRecognition();
-      rec.continuous = false;
-      rec.interimResults = false;
-      rec.lang = 'en-US';
-
-      rec.onstart = () => {
-        setStatus('LISTENING');
-      };
-
-      rec.onresult = (event) => {
-        const transcript = event.results[0][0].transcript;
-        setInputText(transcript);
-        setStatus('IDLE');
-        // Auto-dispatch query upon voice completion
-        if (transcript.trim()) {
-          dispatchQuery(transcript);
-        }
-      };
-
-      rec.onerror = (err) => {
-        console.error('Speech recognition error:', err);
-        setStatus('ERROR');
-        setTimeout(() => setStatus('IDLE'), 2000);
-      };
-
-      rec.onend = () => {
-        // If we didn't transition to running, go back to idle
-        setStatus((prev) => (prev === 'LISTENING' ? 'IDLE' : prev));
-      };
-
-      recognitionRef.current = rec;
+  const listenViaBackend = async () => {
+    setStatus('LISTENING');
+    try {
+      const res = await fetch(`http://${backendAddress}/api/v1/audio/listen`);
+      const data = await res.json();
+      setStatus('IDLE');
+      if (data.text && data.text.trim()) {
+        setInputText(data.text);
+        dispatchQuery(data.text);
+      } else {
+        // If we were in voice mode and they said nothing, hide
+        setUiState(prev => prev === 'VOICE_LISTENING' ? 'HIDDEN' : prev);
+      }
+    } catch (e) {
+      console.error('Audio listen error:', e);
+      setStatus('ERROR');
+      setTimeout(() => setStatus('IDLE'), 2000);
+      setUiState(prev => prev === 'VOICE_LISTENING' ? 'HIDDEN' : prev);
     }
-  }, []);
+  };
+
+  // Background Wake Word Event Listener
+  useEffect(() => {
+    const eventSource = new EventSource(`http://${backendAddress}/api/v1/events`);
+    
+    eventSource.addEventListener('wakeup', () => {
+      console.log('WAKEUP EVENT RECEIVED');
+      // Tell electron to unhide the window
+      if (window.electronAPI) window.electronAPI.requestShow();
+      
+      // Stop current speech
+      window.speechSynthesis.cancel();
+      
+      setUiState('VOICE_LISTENING');
+      
+      // Start listening via backend
+      listenViaBackend();
+    });
+
+    eventSource.onerror = () => setIsConnected(false);
+    eventSource.onopen = () => setIsConnected(true);
+
+    return () => eventSource.close();
+  }, [backendAddress]);
 
   // Listen to Electron IPC Events
   useEffect(() => {
     if (window.electronAPI) {
-      // 1. Connection states
-      window.electronAPI.onConnectionState((connected) => {
-        setIsConnected(connected);
+      window.electronAPI.onSummonText(() => {
+        window.speechSynthesis.cancel();
+        setUiState('TEXT_INPUT');
+        setStatus('IDLE');
+        setTimeout(() => { if (inputRef.current) inputRef.current.focus(); }, 100);
       });
 
-      // 2. Network address updates
-      window.electronAPI.onNetworkUpdate((addr) => {
-        setBackendAddress(addr);
+      window.electronAPI.onSummonVoice(() => {
+        window.speechSynthesis.cancel();
+        setUiState('VOICE_LISTENING');
+        listenViaBackend();
       });
-
-      // 3. Status updates from backend stream
-      window.electronAPI.onStatusUpdate((key) => {
-        setStatus(key);
-      });
-
-      // 4. Streamed replies
-      window.electronAPI.onReplyChunk((chunk) => {
-        setReplyText((prev) => prev + chunk);
-        setStatus('RUNNING');
-      });
-
-      window.electronAPI.onReplyEnd(() => {
-        setStatus('DONE');
-        if (inputRef.current) inputRef.current.focus();
-      });
-
-      // 5. Stream errors
-      window.electronAPI.onError((msg) => {
-        setStatus('ERROR');
-        setReplyText((prev) => prev + `\n[ERROR]: ${msg}`);
-      });
-
-      // 6. When the overlay is summoned, focus the input
-      window.electronAPI.onOverlayShow(() => {
-        if (isExpanded && inputRef.current) {
-          inputRef.current.focus();
-        }
-      });
-    } else {
-      // Mock connection for browser preview
-      setIsConnected(true);
     }
-  }, [isExpanded]);
+  }, []);
 
   // Scroll to bottom of replies
   useEffect(() => {
-    if (replyEndRef.current) {
+    if (replyEndRef.current && uiState === 'EXPANDED_CHAT') {
       replyEndRef.current.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [replyText]);
+  }, [replyText, uiState]);
+
+  // If hidden, notify main process to hide window
+  useEffect(() => {
+    if (uiState === 'HIDDEN' && window.electronAPI) {
+      window.electronAPI.hideOverlay();
+      window.speechSynthesis.cancel();
+      setInputText('');
+      setReplyText('');
+    }
+  }, [uiState]);
 
   // Dispatch query to backend
-  const dispatchQuery = (query) => {
+  const dispatchQuery = async (query) => {
     if (!query.trim()) return;
 
-    // Add to history
     setHistory((prev) => [query, ...prev.slice(0, 49)]);
     setHistoryIndex(-1);
 
+    // Default to EXPANDED_CHAT if they typed it. If voice, stay in voice until <display>
+    if (uiState !== 'VOICE_LISTENING') {
+      setUiState('EXPANDED_CHAT');
+    }
+    
     setStatus('RUNNING');
     setReplyText('');
+    window.speechSynthesis.cancel(); // Stop old speech
 
-    if (window.electronAPI) {
-      window.electronAPI.dispatch(query);
-    } else {
-      // Mock Browser response
-      console.log('Dispatching query (browser mode):', query);
-      let count = 0;
-      const response = `TARS Simulation: Received "${query}". The system is running in browser preview. Please launch in Electron to test real FastAPI streaming.`;
-      const interval = setInterval(() => {
-        const words = response.split(' ');
-        if (count < words.length) {
-          setReplyText((prev) => prev + (count === 0 ? '' : ' ') + words[count]);
-          count++;
-        } else {
-          clearInterval(interval);
-          setStatus('DONE');
+    try {
+      const response = await fetch(`http://${backendAddress}/api/v1/chat/stream`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messages: [{ role: 'user', content: query }] })
+      });
+
+      if (!response.body) throw new Error("No response body");
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder("utf-8");
+      
+      let sentenceBuffer = "";
+      let fullBuffer = "";
+      
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) {
+           setStatus('DONE');
+           if (sentenceBuffer.trim()) {
+               speakText(sentenceBuffer.trim());
+           }
+           break;
         }
-      }, 100);
+        
+        const chunkStr = decoder.decode(value, { stream: true });
+        const lines = chunkStr.split('\n');
+        
+        for (const line of lines) {
+           if (line.startsWith('data: ')) {
+               const dataStr = line.replace('data: ', '').trim();
+               if (dataStr === '{}') continue; 
+               try {
+                  const data = JSON.parse(dataStr);
+                  if (data.chunk) {
+                     fullBuffer += data.chunk;
+                     
+                     // Detect screen display request
+                     if (fullBuffer.includes('<display>')) {
+                        setUiState('EXPANDED_CHAT');
+                     }
+                     
+                     setReplyText(fullBuffer);
+
+                     // Buffer speech chunks
+                     sentenceBuffer += data.chunk;
+                     
+                     // Speak on punctuation boundaries for natural flow
+                     if (/[.!?]\s/.test(sentenceBuffer) || sentenceBuffer.length > 120) {
+                         speakText(sentenceBuffer.trim());
+                         sentenceBuffer = "";
+                     }
+                  } else if (data.detail) {
+                     setStatus('ERROR');
+                     setReplyText(prev => prev + "\n[ERROR]: " + data.detail);
+                  }
+               } catch(e) {}
+           }
+        }
+      }
+    } catch (e) {
+      console.error(e);
+      setStatus('ERROR');
     }
   };
 
-  // Toggle Voice Input
   const toggleVoiceInput = () => {
     if (status === 'LISTENING') {
-      recognitionRef.current?.stop();
+       // Backend doesn't support manual abort yet, so we just wait
     } else {
-      recognitionRef.current?.start();
+       listenViaBackend();
     }
   };
 
-  // Handle Form Submit
   const handleSubmit = (e) => {
     e.preventDefault();
     dispatchQuery(inputText);
     setInputText('');
   };
 
-  // Handle Global Shortcuts
   const handleKeyDown = (e) => {
     if (e.key === 'Escape') {
-      if (isExpanded) {
-        setIsExpanded(false);
-      } else if (window.electronAPI) {
-        window.electronAPI.hideOverlay();
-      }
-    } else if (e.key === 'ArrowUp' && isExpanded) {
-      // Navigate History Up
+      setUiState('HIDDEN');
+    } else if (e.key === 'ArrowUp' && (uiState === 'TEXT_INPUT' || uiState === 'EXPANDED_CHAT')) {
       if (history.length > 0 && historyIndex < history.length - 1) {
         const nextIndex = historyIndex + 1;
         setHistoryIndex(nextIndex);
         setInputText(history[nextIndex]);
       }
-    } else if (e.key === 'ArrowDown' && isExpanded) {
-      // Navigate History Down
+    } else if (e.key === 'ArrowDown' && (uiState === 'TEXT_INPUT' || uiState === 'EXPANDED_CHAT')) {
       if (historyIndex > 0) {
         const nextIndex = historyIndex - 1;
         setHistoryIndex(nextIndex);
@@ -186,17 +227,9 @@ export default function App() {
 
   const handleClose = (e) => {
     e.stopPropagation();
-    if (window.electronAPI) {
-      window.electronAPI.hideOverlay();
-    }
+    setUiState('HIDDEN');
   };
 
-  const handleBackToGlobe = (e) => {
-    e.stopPropagation();
-    setIsExpanded(false);
-  };
-
-  // Status mapping
   const getStatusLabel = () => {
     switch (status) {
       case 'RUNNING': return 'PROCESSING';
@@ -207,6 +240,8 @@ export default function App() {
     }
   };
 
+  if (uiState === 'HIDDEN') return null;
+
   return (
     <div 
       className="w-full h-full flex items-center justify-center bg-transparent"
@@ -214,144 +249,137 @@ export default function App() {
     >
       <motion.div
         layout
-        initial={{ borderRadius: 150, width: 300, height: 300, scale: 0.8, opacity: 0 }}
+        initial={{ opacity: 0, scale: 0.9 }}
         animate={
-          isExpanded
-            ? {
-                borderRadius: '40px 16px 40px 16px',
-                width: 640,
-                height: 420,
-                scale: 1,
-                opacity: 1,
-              }
-            : {
-                borderRadius: 150,
-                width: 300,
-                height: 300,
-                scale: 1,
-                opacity: 1,
-              }
+          uiState === 'TEXT_INPUT'
+            ? { borderRadius: '8px', width: 640, height: 64, scale: 1, opacity: 1, y: 0 }
+            : uiState === 'EXPANDED_CHAT'
+            ? { borderRadius: '8px', width: 640, height: 420, scale: 1, opacity: 1, y: 0 }
+            : uiState === 'VOICE_LISTENING'
+            ? { borderRadius: '60px', width: 120, height: 120, scale: 1, opacity: 1, y: -250 }
+            : { opacity: 0 }
         }
         transition={{
           type: 'spring',
-          stiffness: 240,
-          damping: 24,
-          layout: { duration: 0.35, type: 'spring', stiffness: 220, damping: 24 }
+          stiffness: 300,
+          damping: 30,
+          layout: { duration: 0.4, type: 'spring', stiffness: 280, damping: 28 }
         }}
-        // Enable dragging the window from empty spaces
         style={{ WebkitAppRegion: 'drag' }}
         className="glassmorphic-panel relative flex flex-col items-center justify-center overflow-hidden cursor-grab active:cursor-grabbing select-none"
       >
         <AnimatePresence mode="wait">
-          {!isExpanded ? (
-            /* ── INITIAL STATE: ROTATING GLOBE NODE ── */
+          {uiState === 'VOICE_LISTENING' && (
             <motion.div
-              key="globe-state"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              transition={{ duration: 0.2 }}
-              onClick={() => setIsExpanded(true)}
+              key="voice-state"
+              initial={{ opacity: 0, scale: 0.5 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.5 }}
+              transition={{ duration: 0.3 }}
               style={{ WebkitAppRegion: 'no-drag' }}
               className="w-full h-full flex flex-col items-center justify-center cursor-pointer"
+              onClick={() => setUiState('TEXT_INPUT')}
             >
-              {/* Globe Rendering */}
-              <Globe isListening={status === 'LISTENING'} isProcessing={status === 'RUNNING'} />
-              
-              {/* Floating IDLE indicators inside circle */}
-              <div className="absolute bottom-6 flex items-center gap-2 px-3 py-1 rounded-full border border-white/5 bg-black/40 text-[9px] font-mono tracking-widest text-white/50">
-                <span className="w-1.5 h-1.5 rounded-full bg-white/40 animate-pulse" />
-                HEY TARS
+              <div className="relative w-16 h-16 flex items-center justify-center">
+                <motion.div 
+                  className="absolute inset-0 rounded-full bg-blue-500/40 mix-blend-screen blur-md"
+                  animate={{ scale: [1, 1.5, 1], rotate: [0, 90, 0] }}
+                  transition={{ duration: 2, repeat: Infinity, ease: "easeInOut" }}
+                />
+                <motion.div 
+                  className="absolute inset-0 rounded-full bg-purple-500/40 mix-blend-screen blur-md"
+                  animate={{ scale: [1.2, 0.8, 1.2], rotate: [0, -90, 0] }}
+                  transition={{ duration: 2.5, repeat: Infinity, ease: "easeInOut" }}
+                />
+                <motion.div 
+                  className="absolute inset-0 rounded-full bg-pink-500/40 mix-blend-screen blur-md"
+                  animate={{ scale: [0.9, 1.3, 0.9], rotate: [45, -45, 45] }}
+                  transition={{ duration: 1.8, repeat: Infinity, ease: "easeInOut" }}
+                />
+                <Mic size={24} className="relative z-10 text-white drop-shadow-lg" />
               </div>
             </motion.div>
-          ) : (
-            /* ── INTERACTION STATE: GLASSMORPHIC TEXT & MIC PANEL ── */
+          )}
+
+          {(uiState === 'TEXT_INPUT' || uiState === 'EXPANDED_CHAT') && (
             <motion.div
               key="panel-state"
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              transition={{ duration: 0.25, delay: 0.15 }}
+              transition={{ duration: 0.2 }}
               style={{ WebkitAppRegion: 'no-drag' }}
-              className="w-full h-full flex flex-col p-6 cursor-default select-text"
+              className={`w-full h-full flex flex-col cursor-default select-text ${
+                uiState === 'EXPANDED_CHAT' ? 'p-5' : 'px-3 py-2 justify-center'
+              }`}
             >
-              {/* Header Telemetry Row */}
-              <div className="flex items-center justify-between mb-4 border-b border-white/5 pb-2 text-[10px] font-mono tracking-wider text-cyber-muted">
-                <div className="flex items-center gap-3">
-                  <button 
-                    onClick={handleBackToGlobe}
-                    className="hover:text-white transition-colors p-0.5 rounded hover:bg-white/5 cursor-pointer"
-                    title="Return to Globe"
-                  >
-                    <ArrowLeft size={12} />
-                  </button>
-                  <div className="flex items-center gap-1.5">
-                    <span className={`w-1.5 h-1.5 rounded-full ${
-                      status === 'RUNNING' ? 'bg-amber-400 animate-pulse' :
-                      status === 'LISTENING' ? 'bg-pink-400 animate-ping' :
-                      status === 'ERROR' ? 'bg-red-400' : 'bg-white/60'
-                    }`} />
-                    <span className="text-white/80">{getStatusLabel()}</span>
-                  </div>
-                </div>
+              {uiState === 'EXPANDED_CHAT' && (
+                <>
+                  <div className="flex items-center justify-between mb-4 border-b border-white/5 pb-2 text-[10px] font-mono tracking-wider text-cyber-muted">
+                    <div className="flex items-center gap-3">
+                      <div className="flex items-center gap-1.5">
+                        <span className={`w-1.5 h-1.5 rounded-full ${
+                          status === 'RUNNING' ? 'bg-amber-400 animate-pulse' :
+                          status === 'LISTENING' ? 'bg-pink-400 animate-ping' :
+                          status === 'ERROR' ? 'bg-red-400' : 'bg-white/60'
+                        }`} />
+                        <span className="text-white/80">{getStatusLabel()}</span>
+                      </div>
+                    </div>
 
-                <div className="flex items-center gap-4">
-                  {/* Connection Node */}
-                  <div className="flex items-center gap-1.5">
-                    {isConnected ? (
-                      <Wifi size={10} className="text-emerald-400" />
+                    <div className="flex items-center gap-4">
+                      <div className="flex items-center gap-1.5">
+                        {isConnected ? (
+                          <Wifi size={10} className="text-emerald-400" />
+                        ) : (
+                          <WifiOff size={10} className="text-red-400" />
+                        )}
+                        <span>{backendAddress}</span>
+                      </div>
+                      <button 
+                        onClick={handleClose}
+                        className="hover:text-white transition-colors cursor-pointer"
+                        title="Hide Overlay"
+                      >
+                        <X size={13} />
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="flex-1 w-full overflow-y-auto no-scrollbar pr-1 min-h-[120px] mb-4 text-white font-mono text-[13px] leading-relaxed select-text selection:bg-white/10">
+                    {replyText ? (
+                      <div className="whitespace-pre-wrap">
+                        {/* Format <display> tags cleanly if shown */}
+                        {replyText.replace(/<display>/g, '\n--- Display Render ---\n').replace(/<\/display>/g, '\n----------------------\n')}
+                        {status === 'RUNNING' && <span className="cursor-blink" />}
+                      </div>
                     ) : (
-                      <WifiOff size={10} className="text-red-400" />
+                      <div className="text-cyber-muted italic select-none">
+                        {status === 'LISTENING' ? 'Listening to voice...' : 'Awaiting prompt sequence...'}
+                      </div>
                     )}
-                    <span>{backendAddress}</span>
+                    <div ref={replyEndRef} />
                   </div>
-                  
-                  {/* Close button */}
-                  <button 
-                    onClick={handleClose}
-                    className="hover:text-white transition-colors cursor-pointer"
-                    title="Hide Overlay"
-                  >
-                    <X size={13} />
-                  </button>
-                </div>
-              </div>
+                </>
+              )}
 
-              {/* Streaming Output / Response Area */}
-              <div className="flex-1 w-full overflow-y-auto no-scrollbar pr-1 min-h-[120px] mb-4 text-white font-mono text-[13px] leading-relaxed select-text selection:bg-white/10">
-                {replyText ? (
-                  <div className="whitespace-pre-wrap">
-                    {replyText}
-                    {status === 'RUNNING' && <span className="cursor-blink" />}
-                  </div>
-                ) : (
-                  <div className="text-cyber-muted italic select-none">
-                    {status === 'LISTENING' ? 'Listening to voice...' : 'Awaiting prompt sequence...'}
-                  </div>
-                )}
-                <div ref={replyEndRef} />
-              </div>
-
-              {/* Input Row */}
               <form 
                 onSubmit={handleSubmit}
-                className="relative flex items-center w-full rounded-2xl border border-white/10 bg-black/60 shadow-[inset_-2px_-2px_6px_rgba(0,0,0,0.8),_inset_2px_2px_4px_rgba(255,255,255,0.03)] px-4 py-2.5 transition-all duration-300 focus-within:border-white/20"
+                className="relative flex items-center w-full rounded-md border border-white/10 bg-black/60 shadow-[inset_-1px_-1px_3px_rgba(0,0,0,0.8),_inset_1px_1px_2px_rgba(255,255,255,0.03)] px-3 py-1.5 transition-all duration-300 focus-within:border-white/20"
               >
-                {/* Voice Activation Indicator / Toggle Button */}
                 <button
                   type="button"
                   onClick={toggleVoiceInput}
-                  className={`flex items-center justify-center p-2 rounded-xl border border-white/5 transition-all duration-300 cursor-pointer ${
+                  className={`flex items-center justify-center p-1.5 rounded-md border transition-all duration-300 cursor-pointer ${
                     status === 'LISTENING' 
-                      ? 'bg-white/10 border-white/30 text-white pulse-mic-icon' 
-                      : 'bg-white/5 text-cyber-muted hover:text-white hover:bg-white/10'
+                      ? 'bg-white/10 border-white/30 text-white pulse-mic-icon shadow-[inset_1px_1px_2px_rgba(255,255,255,0.1),_0_0_8px_rgba(255,255,255,0.2)]' 
+                      : 'bg-transparent border-transparent text-cyber-muted hover:text-white hover:bg-white/5'
                   }`}
                   title={status === 'LISTENING' ? 'Stop Listening' : 'Voice Input'}
                 >
-                  <Mic size={16} />
+                  <Mic size={14} />
                 </button>
 
-                {/* Minimal text input field */}
                 <input
                   ref={inputRef}
                   type="text"
@@ -359,33 +387,33 @@ export default function App() {
                   onChange={(e) => setInputText(e.target.value)}
                   placeholder={status === 'LISTENING' ? 'Listening...' : 'Type query or sequence...'}
                   disabled={status === 'LISTENING'}
-                  className="flex-1 bg-transparent border-0 outline-none ring-0 shadow-none text-white placeholder-cyber-muted font-sans text-sm ml-3.5 mr-2 h-8"
+                  className="flex-1 bg-transparent border-0 outline-none ring-0 shadow-none text-white placeholder-cyber-muted font-sans text-[13px] ml-3 mr-2 h-7"
                   autoFocus
                 />
 
-                {/* Send Button */}
                 <button
                   type="submit"
                   disabled={!inputText.trim() || status === 'LISTENING'}
-                  className={`flex items-center justify-center p-2 rounded-xl border border-white/5 bg-white/5 transition-all duration-300 ${
+                  className={`flex items-center justify-center p-1.5 rounded-md border transition-all duration-300 ${
                     inputText.trim() && status !== 'LISTENING'
-                      ? 'text-white hover:text-black hover:bg-white border-white/20 cursor-pointer'
-                      : 'text-cyber-muted cursor-not-allowed opacity-50'
+                      ? 'text-white hover:text-black hover:bg-white border-white/20 cursor-pointer shadow-[0_0_8px_rgba(255,255,255,0.1)]'
+                      : 'border-transparent bg-transparent text-cyber-muted cursor-not-allowed opacity-50'
                   }`}
                 >
-                  <Send size={14} />
+                  <Send size={12} />
                 </button>
               </form>
 
-              {/* Keyboard shortcut footer */}
-              <div className="flex items-center justify-between mt-3 text-[9px] font-mono text-cyber-muted select-none">
-                <div>TARS v1.0.0</div>
-                <div className="flex gap-2">
-                  <span><kbd className="px-1 bg-white/5 rounded border border-white/10">ESC</kbd> dismiss</span>
-                  <span>·</span>
-                  <span><kbd className="px-1 bg-white/5 rounded border border-white/10">↑↓</kbd> history</span>
+              {uiState === 'EXPANDED_CHAT' && (
+                <div className="flex items-center justify-between mt-3 text-[9px] font-mono text-cyber-muted select-none">
+                  <div>TARS v1.0.0</div>
+                  <div className="flex gap-2">
+                    <span><kbd className="px-1 bg-white/5 rounded border border-white/10">ESC</kbd> dismiss</span>
+                    <span>·</span>
+                    <span><kbd className="px-1 bg-white/5 rounded border border-white/10">↑↓</kbd> history</span>
+                  </div>
                 </div>
-              </div>
+              )}
             </motion.div>
           )}
         </AnimatePresence>
