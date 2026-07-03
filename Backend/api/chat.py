@@ -102,12 +102,21 @@ async def listen_for_command():
     voice_engine.stop()
     text = ""
     try:
-        # We need a new recognizer instance for synchronous listening
+        import sounddevice as sd
+        import speech_recognition as sr
+        
         recognizer = sr.Recognizer()
-        with sr.Microphone() as source:
-            # Short timeout to avoid hanging if they didn't say anything
-            audio = recognizer.listen(source, timeout=5, phrase_time_limit=10)
-            text = recognizer.recognize_google(audio)
+        samplerate = 16000
+        duration = 5.0
+        
+        print("[TARS] Listening for command...", flush=True)
+        audio_data = sd.rec(int(samplerate * duration), samplerate=samplerate, channels=1, dtype='int16')
+        sd.wait()
+        
+        raw_audio = audio_data.tobytes()
+        audio = sr.AudioData(raw_audio, samplerate, 2)
+        text = recognizer.recognize_google(audio)
+        print(f"[TARS] Heard: {text}", flush=True)
     except Exception as e:
         import logging
         logging.error(f"Error during command listening: {e}")
@@ -116,16 +125,18 @@ async def listen_for_command():
         
     return {"text": text}
 
-@router.get("/audio/synthesize")
-async def synthesize_audio(text: str, voice: str = "en-GB-RyanNeural"):
+from fastapi.responses import Response
+
+@router.get("/audio/tars-tts")
+async def tars_tts(text: str):
     """
-    Synthesize audio using Edge-TTS and stream it back directly.
+    Synthesize TARS voice with Kokoro and Pedalboard effects.
     """
-    communicate = edge_tts.Communicate(text, voice)
-    
-    async def audio_stream():
-        async for chunk in communicate.stream():
-            if chunk["type"] == "audio":
-                yield chunk["data"]
-                
-    return StreamingResponse(audio_stream(), media_type="audio/mpeg")
+    try:
+        from services.tars_voice import generate_tars_speech
+        wav_bytes = generate_tars_speech(text)
+        return Response(content=wav_bytes, media_type="audio/wav")
+    except Exception as e:
+        import logging
+        logging.error(f"Error generating TARS TTS: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))

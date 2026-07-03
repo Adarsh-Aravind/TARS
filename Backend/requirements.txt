@@ -16,3 +16,7 @@ litellm
 SpeechRecognition
 sounddevice
 numpy
+kokoro-onnx
+onnxruntime
+pedalboard
+soundfile

@@ -15,18 +15,57 @@ export default function App() {
   const inputRef = useRef(null);
   const replyEndRef = useRef(null);
   
-  // No longer using webkitSpeechRecognition - relying on backend for listening
-  
+  const audioQueue = useRef([]);
+  const isPlaying = useRef(false);
+  const audioContext = useRef(null);
+  const currentAudioSource = useRef(null);
+
+  const stopAudio = () => {
+     audioQueue.current = [];
+     if (currentAudioSource.current) {
+         try { currentAudioSource.current.stop(); } catch(e){}
+         currentAudioSource.current = null;
+     }
+     isPlaying.current = false;
+  };
+
+  const playNextAudio = async () => {
+    if (isPlaying.current || audioQueue.current.length === 0) return;
+    isPlaying.current = true;
+    
+    if (!audioContext.current) {
+        audioContext.current = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    
+    const text = audioQueue.current.shift();
+    try {
+        const response = await fetch(`http://${backendAddress}/api/v1/audio/tars-tts?text=${encodeURIComponent(text)}`);
+        const arrayBuffer = await response.arrayBuffer();
+        const audioBuffer = await audioContext.current.decodeAudioData(arrayBuffer);
+        
+        const source = audioContext.current.createBufferSource();
+        source.buffer = audioBuffer;
+        source.connect(audioContext.current.destination);
+        currentAudioSource.current = source;
+        source.onended = () => {
+            currentAudioSource.current = null;
+            isPlaying.current = false;
+            playNextAudio();
+        };
+        source.start(0);
+    } catch (e) {
+        console.error("Audio play error", e);
+        currentAudioSource.current = null;
+        isPlaying.current = false;
+        playNextAudio();
+    }
+  };
+
   const speakText = (text) => {
-    // Strip out <display>...</display> tags from spoken text
     const cleanText = text.replace(/<display>[\s\S]*?<\/display>/g, '').trim();
     if (!cleanText) return;
-    
-    // Stop any existing speech before starting new sentence
-    // (Optional: can be removed if you want seamless continuous talking, 
-    // but useful if user interrupts)
-    const utterance = new SpeechSynthesisUtterance(cleanText);
-    window.speechSynthesis.speak(utterance);
+    audioQueue.current.push(cleanText);
+    playNextAudio();
   };
 
   const listenViaBackend = async () => {
@@ -60,7 +99,7 @@ export default function App() {
       if (window.electronAPI) window.electronAPI.requestShow();
       
       // Stop current speech
-      window.speechSynthesis.cancel();
+      stopAudio();
       
       setUiState('VOICE_LISTENING');
       
@@ -78,14 +117,14 @@ export default function App() {
   useEffect(() => {
     if (window.electronAPI) {
       window.electronAPI.onSummonText(() => {
-        window.speechSynthesis.cancel();
+        stopAudio();
         setUiState('TEXT_INPUT');
         setStatus('IDLE');
         setTimeout(() => { if (inputRef.current) inputRef.current.focus(); }, 100);
       });
 
       window.electronAPI.onSummonVoice(() => {
-        window.speechSynthesis.cancel();
+        stopAudio();
         setUiState('VOICE_LISTENING');
         listenViaBackend();
       });
@@ -103,7 +142,7 @@ export default function App() {
   useEffect(() => {
     if (uiState === 'HIDDEN' && window.electronAPI) {
       window.electronAPI.hideOverlay();
-      window.speechSynthesis.cancel();
+      stopAudio();
       setInputText('');
       setReplyText('');
     }
@@ -123,7 +162,7 @@ export default function App() {
     
     setStatus('RUNNING');
     setReplyText('');
-    window.speechSynthesis.cancel(); // Stop old speech
+    stopAudio(); // Stop old speech
 
     try {
       const response = await fetch(`http://${backendAddress}/api/v1/chat/stream`, {

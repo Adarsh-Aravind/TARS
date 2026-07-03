@@ -64,6 +64,13 @@ def mic_listener():
             sys.stderr.flush()
             
             if "tars" in text or "hey tars" in text or "taars" in text or "stars" in text:
+                try:
+                    from services.tars_voice import play_greeting
+                    play_greeting()
+                except Exception as ex:
+                    print(f"[WAKE-WORD ERROR] Failed to play greeting: {ex}", file=sys.stderr)
+                    sys.stderr.flush()
+
                 print("WAKE")
                 sys.stdout.flush()
                 print("[WAKE-WORD MATCH] 'HEY TARS' spotted! WAKE command sent to Electron.", file=sys.stderr)
