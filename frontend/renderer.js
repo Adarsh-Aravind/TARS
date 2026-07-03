@@ -1,128 +1,141 @@
 /**
- * ROMANOV — Command Overlay  ·  renderer.js
- * Electron renderer-process script (runs in Chromium, both macOS + Windows)
+ * ROMANOV — renderer.js
+ * Electron renderer-process script · macOS + Windows
  *
  * Responsibilities:
- *  1. Input lifecycle (focus, clear, dispatch)
- *  2. Keyboard shortcuts (Enter, Escape, arrow history)
- *  3. Status label cycling via Electron IPC
- *  4. Network address live-update via Electron IPC
- *  5. Platform detection + micro-adjustments
- *  6. Connection state management
+ *  1. Input lifecycle (focus, clear, dispatch on Enter)
+ *  2. Keyboard shortcuts (Enter · Escape · ↑↓ history · Ctrl/Cmd+L)
+ *  3. Status UI updates (dot + label) driven by IPC or internal state
+ *  4. Connection indicator (live/dead dot)
+ *  5. Network address live-update via IPC
+ *  6. Voice input via Web Speech API (mic button)
+ *  7. Platform detection + micro-adjustments
+ *  8. IPC bridge — works with both contextIsolation modes
+ *
+ * NOTE: Show/hide is handled entirely by Electron (globalShortcut + BrowserWindow).
+ *       We only react to the 'romanov:show' event to re-focus the input.
  */
 
 'use strict';
 
-/* ── DOM refs ──────────────────────────────────────────────────────── */
-const input        = document.getElementById('romanov-input');
-const sysLabel     = document.getElementById('sys-status-label');
-const opLabel      = document.getElementById('op-status-label');
-const netAddrLabel = document.getElementById('net-addr-label');
-const connDot      = document.getElementById('conn-dot');
+/* ── DOM refs ──────────────────────────────────────────────────── */
+const input       = document.getElementById('romanov-input');
+const statusDot   = document.getElementById('status-dot');
+const statusText  = document.getElementById('status-text');
+const connDot     = document.getElementById('conn-dot');
+const connLabel   = document.getElementById('conn-label');
+const micBtn      = document.getElementById('mic-btn');
+const iconIdle    = document.getElementById('icon-idle');
+const iconRunning = document.getElementById('icon-running');
+const iconMic     = document.getElementById('icon-mic');
 
-/* ── Platform detection ────────────────────────────────────────────── */
-// Electron exposes process.platform in the renderer (if nodeIntegration: true)
-// or via a preload-exposed API. We fall back to UA sniffing if neither is available.
+/* ── Platform detection ─────────────────────────────────────────── */
 const platform = (() => {
   if (typeof process !== 'undefined' && process.platform) return process.platform;
   const ua = navigator.userAgent.toLowerCase();
-  if (ua.includes('win')) return 'win32';
-  if (ua.includes('mac')) return 'darwin';
+  if (ua.includes('win'))  return 'win32';
+  if (ua.includes('mac'))  return 'darwin';
   return 'linux';
 })();
 
 const IS_WIN = platform === 'win32';
 const IS_MAC = platform === 'darwin';
 
-/* ── Command history (session only) ────────────────────────────────── */
-const history   = [];
-let   histIndex = -1;
+document.documentElement.dataset.platform = platform;
 
-/* ── Status label state ────────────────────────────────────────────── */
-const STATUS = Object.freeze({
-  IDLE:    { primary: 'SYS.READY',  secondary: 'OP.IDLE'  },
-  RUNNING: { primary: 'PROC.RUN',   secondary: 'OP.BUSY'  },
-  SYNCING: { primary: 'NET.SYNC',   secondary: 'OP.WAIT'  },
-  ERROR:   { primary: 'SYS.FAULT',  secondary: 'OP.ERR'   },
-  DONE:    { primary: 'PROC.DONE',  secondary: 'OP.IDLE'  },
+/* ── Command history (session only, max 50) ─────────────────────── */
+const cmdHistory = [];
+let   histIndex  = -1;
+
+/* ── Status machine ─────────────────────────────────────────────── */
+const STATUS_MAP = Object.freeze({
+  IDLE:      { dot: 'idle',      label: 'Ready'     },
+  RUNNING:   { dot: 'running',   label: 'Processing' },
+  SYNCING:   { dot: 'running',   label: 'Syncing'   },
+  DONE:      { dot: 'done',      label: 'Done'      },
+  ERROR:     { dot: 'error',     label: 'Error'     },
+  LISTENING: { dot: 'listening', label: 'Listening' },
 });
 
-function setStatus(key) {
-  const s = STATUS[key] || STATUS.IDLE;
-  if (sysLabel) sysLabel.textContent = s.primary;
-  if (opLabel)  opLabel.textContent  = s.secondary;
+function setStatus(key = 'IDLE') {
+  const s = STATUS_MAP[key] || STATUS_MAP.IDLE;
+
+  // Update dot class
+  statusDot.className = `status-dot ${s.dot}`;
+
+  // Update label text
+  statusText.textContent = s.label;
+
+  // Swap leading icon
+  iconIdle.classList.toggle('hidden',    key !== 'IDLE' && key !== 'DONE');
+  iconRunning.classList.toggle('hidden', key !== 'RUNNING' && key !== 'SYNCING');
+  iconMic.classList.toggle('hidden',     key !== 'LISTENING');
 }
 
-/* ── Connection state ──────────────────────────────────────────────── */
+/* ── Connection indicator ───────────────────────────────────────── */
 function setConnected(isConnected) {
-  if (!connDot) return;
-  if (isConnected) {
-    connDot.style.background  = 'var(--col-emerald)';
-    connDot.style.boxShadow   = '0 0 5px 1.5px rgba(16,185,129,0.85)';
-    connDot.title = 'Backend connection live';
-  } else {
-    connDot.style.background  = '#ef4444';
-    connDot.style.boxShadow   = '0 0 5px 1.5px rgba(239,68,68,0.85)';
-    connDot.title = 'Backend disconnected';
-  }
+  connDot.className = `conn-dot ${isConnected ? 'connected' : 'disconnected'}`;
+  connDot.title     = isConnected ? 'Backend connected' : 'Backend disconnected';
 }
 
 function setNetworkAddress(addr) {
-  if (netAddrLabel) netAddrLabel.textContent = addr;
+  if (connLabel) connLabel.textContent = addr;
 }
 
-/* ── Input dispatch ────────────────────────────────────────────────── */
+/* ── Dispatch query to backend via IPC ─────────────────────────── */
 function dispatchQuery(query) {
   if (!query) return;
 
-  // Push to session history
-  if (history[0] !== query) history.unshift(query);
-  if (history.length > 50)  history.pop();
+  // Save to history (deduplicate head)
+  if (cmdHistory[0] !== query) cmdHistory.unshift(query);
+  if (cmdHistory.length > 50)  cmdHistory.pop();
   histIndex = -1;
 
-  // Signal "running" state
   setStatus('RUNNING');
 
-  // ── Electron IPC bridge ───────────────────────────────────────────
-  // If using contextIsolation: true + preload.js exposing electronAPI:
+  // IPC bridge — preload API (contextIsolation: true)
   if (window.electronAPI?.dispatch) {
     window.electronAPI.dispatch(query);
-  } else {
-    // Fallback: raw ipcRenderer (nodeIntegration: true)
-    try {
-      const { ipcRenderer } = require('electron');
-      ipcRenderer.send('romanov:dispatch', query);
-    } catch (_) {
-      // Neither available — log for development
-      console.log('[ROMANOV] → dispatch:', query);
-    }
+    return;
   }
+
+  // IPC bridge — raw ipcRenderer (nodeIntegration: true)
+  try {
+    const { ipcRenderer } = require('electron');
+    ipcRenderer.send('romanov:dispatch', query);
+    return;
+  } catch (_) { /* not in Electron */ }
+
+  // Browser dev: log
+  console.log('[ROMANOV] dispatch →', query);
 }
 
+/* ── Hide overlay ──────────────────────────────────────────────── */
 function hideOverlay() {
   input.value = '';
   histIndex   = -1;
-  input.blur();
+  setStatus('IDLE');
+  stopListening();
 
   if (window.electronAPI?.hideOverlay) {
     window.electronAPI.hideOverlay();
-  } else {
-    try {
-      const { ipcRenderer } = require('electron');
-      ipcRenderer.send('romanov:hide');
-    } catch (_) {
-      // browser preview — no-op
-      console.log('[ROMANOV] Overlay hide requested');
-    }
+    return;
   }
+
+  try {
+    const { ipcRenderer } = require('electron');
+    ipcRenderer.send('romanov:hide');
+    return;
+  } catch (_) { /* not in Electron */ }
+
+  // Browser preview: just clear
+  console.log('[ROMANOV] hide requested');
 }
 
-/* ── Keyboard handler ──────────────────────────────────────────────── */
+/* ── Keyboard handler ───────────────────────────────────────────── */
 input.addEventListener('keydown', (e) => {
-
   switch (e.key) {
 
-    /* Enter: dispatch */
     case 'Enter': {
       const query = input.value.trim();
       if (query) {
@@ -132,37 +145,32 @@ input.addEventListener('keydown', (e) => {
       break;
     }
 
-    /* Escape: hide */
     case 'Escape': {
       hideOverlay();
       break;
     }
 
-    /* Arrow Up: previous history entry */
     case 'ArrowUp': {
       e.preventDefault();
-      if (history.length === 0) break;
-      histIndex = Math.min(histIndex + 1, history.length - 1);
-      input.value = history[histIndex];
-      // Move cursor to end
+      if (!cmdHistory.length) break;
+      histIndex = Math.min(histIndex + 1, cmdHistory.length - 1);
+      input.value = cmdHistory[histIndex];
       requestAnimationFrame(() => {
         input.selectionStart = input.selectionEnd = input.value.length;
       });
       break;
     }
 
-    /* Arrow Down: next history entry */
     case 'ArrowDown': {
       e.preventDefault();
-      histIndex = Math.max(histIndex - 1, -1);
-      input.value = histIndex === -1 ? '' : history[histIndex];
+      histIndex   = Math.max(histIndex - 1, -1);
+      input.value = histIndex === -1 ? '' : cmdHistory[histIndex];
       requestAnimationFrame(() => {
         input.selectionStart = input.selectionEnd = input.value.length;
       });
       break;
     }
 
-    /* Ctrl+L / Cmd+L: clear input */
     case 'l':
     case 'L': {
       const mod = IS_MAC ? e.metaKey : e.ctrlKey;
@@ -172,66 +180,111 @@ input.addEventListener('keydown', (e) => {
   }
 });
 
-/* ── Electron IPC listeners (preload API pattern) ──────────────────── */
+/* ── Voice input (Web Speech API) ───────────────────────────────── */
+let recognition = null;
+let isListening = false;
 
-// Status updates from main process
-if (window.electronAPI?.onStatusUpdate) {
-  window.electronAPI.onStatusUpdate((key) => setStatus(key));
+function startListening() {
+  const SpeechRecognition =
+    window.SpeechRecognition || window.webkitSpeechRecognition;
+
+  if (!SpeechRecognition) {
+    console.warn('[ROMANOV] Speech recognition not supported.');
+    return;
+  }
+
+  recognition = new SpeechRecognition();
+  recognition.continuous      = false;
+  recognition.interimResults  = true;
+  recognition.lang            = 'en-US';
+
+  recognition.onstart = () => {
+    isListening = true;
+    micBtn.classList.add('listening');
+    setStatus('LISTENING');
+    input.placeholder = 'Listening…';
+  };
+
+  recognition.onresult = (e) => {
+    const transcript = Array.from(e.results)
+      .map(r => r[0].transcript)
+      .join('');
+    input.value = transcript;
+
+    // If final result, auto-dispatch
+    if (e.results[e.results.length - 1].isFinal) {
+      stopListening();
+      if (transcript.trim()) {
+        dispatchQuery(transcript.trim());
+        input.value = '';
+      }
+    }
+  };
+
+  recognition.onerror = (e) => {
+    console.warn('[ROMANOV] Voice error:', e.error);
+    stopListening();
+  };
+
+  recognition.onend = () => {
+    stopListening();
+  };
+
+  recognition.start();
 }
 
-// Network address live update
-if (window.electronAPI?.onNetworkUpdate) {
-  window.electronAPI.onNetworkUpdate((addr) => setNetworkAddress(addr));
+function stopListening() {
+  if (recognition) {
+    try { recognition.stop(); } catch (_) {}
+    recognition = null;
+  }
+  isListening = false;
+  micBtn.classList.remove('listening');
+  if (statusDot.classList.contains('listening')) setStatus('IDLE');
+  input.placeholder = 'Ask anything or give a command…';
 }
 
-// Connection state
-if (window.electronAPI?.onConnectionState) {
-  window.electronAPI.onConnectionState((connected) => setConnected(connected));
-}
+micBtn.addEventListener('click', () => {
+  if (isListening) {
+    stopListening();
+  } else {
+    startListening();
+  }
+});
 
-// Overlay shown → re-focus and reset status
-if (window.electronAPI?.onOverlayShow) {
-  window.electronAPI.onOverlayShow(() => {
+/* ── IPC listeners ──────────────────────────────────────────────── */
+
+// Preload API pattern (contextIsolation: true)
+if (window.electronAPI) {
+  window.electronAPI.onStatusUpdate?.((key)       => setStatus(key));
+  window.electronAPI.onNetworkUpdate?.((addr)      => setNetworkAddress(addr));
+  window.electronAPI.onConnectionState?.((live)    => setConnected(live));
+  window.electronAPI.onOverlayShow?.(() => {
     setStatus('IDLE');
     requestAnimationFrame(() => input.focus());
   });
 }
 
-// Alternative: raw ipcRenderer (if nodeIntegration: true)
+// Raw ipcRenderer (nodeIntegration: true)
 try {
   const { ipcRenderer } = require('electron');
-  ipcRenderer.on('romanov:status',     (_, key)       => setStatus(key));
-  ipcRenderer.on('romanov:network',    (_, addr)      => setNetworkAddress(addr));
-  ipcRenderer.on('romanov:connected',  (_, connected) => setConnected(connected));
-  ipcRenderer.on('romanov:show',       ()             => {
+  ipcRenderer.on('romanov:status',    (_, key)  => setStatus(key));
+  ipcRenderer.on('romanov:network',   (_, addr) => setNetworkAddress(addr));
+  ipcRenderer.on('romanov:connected', (_, live) => setConnected(live));
+  ipcRenderer.on('romanov:show', () => {
     setStatus('IDLE');
     requestAnimationFrame(() => input.focus());
   });
 } catch (_) {
-  // contextIsolation mode or browser preview — IPC handled via electronAPI above
+  // contextIsolation mode or browser — handled above
 }
 
-/* ── Platform micro-adjustments ────────────────────────────────────── */
+/* ── Windows font tweak ─────────────────────────────────────────── */
 if (IS_WIN) {
-  // Windows renders fonts slightly heavier — back off weight a step
   document.documentElement.style.setProperty('--font-weight-adjust', '300');
-
-  // Windows Electron: vibrancy/acrylic requires the window to have
-  // `backgroundMaterial: 'acrylic'` set in BrowserWindow options.
-  // Flag it on the DOM so main.js can detect renderer readiness.
-  document.documentElement.dataset.platform = 'win32';
 }
 
-if (IS_MAC) {
-  document.documentElement.dataset.platform = 'darwin';
-}
-
-/* ── Auto-focus on DOMContentLoaded ───────────────────────────────── */
-window.addEventListener('DOMContentLoaded', () => {
+/* ── Auto-focus ─────────────────────────────────────────────────── */
+document.addEventListener('DOMContentLoaded', () => {
   requestAnimationFrame(() => input.focus());
 });
-
-/* ── Export helpers for main process if needed ─────────────────────── */
-if (typeof module !== 'undefined') {
-  module.exports = { setStatus, setNetworkAddress, setConnected };
-}
