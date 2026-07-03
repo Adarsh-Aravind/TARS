@@ -1,0 +1,34 @@
+{
+  "name": "romanov",
+  "version": "0.1.0",
+  "description": "Cross-platform frameless AI assistant overlay",
+  "main": "main.js",
+  "author": "",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "dist:mac": "electron-builder --mac",
+    "dist:win": "electron-builder --win"
+  },
+  "devDependencies": {
+    "electron": "^31.7.7",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.romanov.overlay",
+    "productName": "ROMANOV",
+    "files": [
+      "main.js",
+      "preload.js",
+      "../frontend/**/*"
+    ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "target": "dmg"
+    },
+    "win": {
+      "target": "nsis"
+    }
+  }
+}
