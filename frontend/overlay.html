@@ -40,7 +40,7 @@
   Add class "preview-bg" when opening in a browser for preview.
   Remove it in Electron — the window background is transparent.
 -->
-<body class="preview-bg">
+<body class="">
 
   <!-- ═══════════════════════════════════════════════════════
        ROMANOV SHELL
@@ -136,6 +136,11 @@
         </div>
 
       </div><!-- /meta-row -->
+
+      <!-- ── Reply box (hidden by default) ── -->
+      <div id="reply-box" class="reply-box hidden">
+        <div class="reply-content" id="reply-content"></div>
+      </div>
 
     </div><!-- /glass-card -->
 

@@ -12,6 +12,7 @@ const {
   Tray,
   Menu,
   nativeImage,
+  session,
 } = require('electron');
 const path = require('path');
 const http = require('http');
@@ -145,6 +146,12 @@ function registerIpcHandlers() {
   ipcMain.on('romanov:hide', () => {
     hideOverlay();
   });
+
+  ipcMain.on('romanov:resize-window', (event, height) => {
+    if (mainWindow) {
+      mainWindow.setContentSize(WINDOW_WIDTH, height);
+    }
+  });
 }
 
 async function handleDispatch(query) {
@@ -155,7 +162,7 @@ async function handleDispatch(query) {
     const response = await fetch(`http://${BACKEND_HOST}:${BACKEND_PORT}/api/v1/chat/stream`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: query }),
+      body: JSON.stringify({ messages: [{ role: 'user', content: query }] }),
     });
 
     if (!response.ok || !response.body) {
@@ -163,18 +170,35 @@ async function handleDispatch(query) {
     }
 
     const reader = response.body.getReader();
-    const decoder = new TextDecoder();
+    const decoder = new TextDecoder("utf-8");
 
-    // Stream SSE chunks straight to the renderer as they arrive.
-    // renderer.js can listen on 'romanov:stream-chunk' to render tokens live.
-    // eslint-disable-next-line no-constant-condition
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-      const chunk = decoder.decode(value, { stream: true });
-      mainWindow.webContents.send('romanov:stream-chunk', chunk);
+      
+      const chunkStr = decoder.decode(value, { stream: true });
+      const lines = chunkStr.split('\n');
+      
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          const dataStr = line.substring(6).trim();
+          if (!dataStr) continue;
+          
+          try {
+            const data = JSON.parse(dataStr);
+            if (data.chunk) {
+              mainWindow.webContents.send('romanov:reply-chunk', data.chunk);
+            } else if (data.detail) {
+              mainWindow.webContents.send('romanov:error', data.detail);
+            }
+          } catch (e) {
+            // ignore JSON parse errors on incomplete chunks if any
+          }
+        }
+      }
     }
 
+    mainWindow.webContents.send('romanov:reply-end');
     mainWindow.webContents.send('romanov:status', 'DONE');
   } catch (err) {
     mainWindow.webContents.send('romanov:status', 'ERROR');
@@ -234,6 +258,15 @@ app.whenReady().then(() => {
   if (process.platform === 'darwin' && app.dock) {
     app.dock.hide();
   }
+
+  // Allow microphone access for Web Speech API
+  session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
+    if (permission === 'media') {
+      callback(true);
+    } else {
+      callback(false);
+    }
+  });
 
   createWindow();
   createTray();

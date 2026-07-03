@@ -4,7 +4,7 @@ from typing import List, Dict, Any, Optional, AsyncGenerator
 from openai import AsyncOpenAI
 
 from config import settings
-from services.tools import handle_tool_call
+from services.tools import handle_tool_call, TOOLS_SCHEMA
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +66,7 @@ class LLMEngine:
             cls._instance = cls(provider)
         return cls._instance
 
-    def _apply_rolling_window(self, messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    def _apply_rolling_window(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if len(messages) <= self.max_history_turns:
             return messages
         has_system = messages[0].get("role") == "system"
@@ -74,7 +74,7 @@ class LLMEngine:
             return [messages[0]] + messages[-(self.max_history_turns - 1):]
         return messages[-self.max_history_turns:]
 
-    def _build_messages(self, session_id: str, user_message: str) -> List[Dict[str, str]]:
+    def _build_messages(self, session_id: str, user_message: str) -> List[Dict[str, Any]]:
         history = self._session_history.setdefault(
             session_id, [{"role": "system", "content": SYSTEM_PROMPT}]
         )
@@ -88,6 +88,7 @@ class LLMEngine:
         self = cls._get_instance(provider)
         messages = self._build_messages(session_id, user_message)
         full_reply = ""
+        tool_calls = {}
 
         try:
             response = await self.client.chat.completions.create(
@@ -95,10 +96,7 @@ class LLMEngine:
                 messages=messages,
                 temperature=self.temperature,
                 stream=True,
-                # NOTE: to actually get tool_call deltas back from the API,
-                # pass `tools=[...]` here using the schema services/tools.py
-                # exposes. That file wasn't in scope for this fix, so
-                # handle_tool_call is imported but not yet wired to a schema.
+                tools=TOOLS_SCHEMA,
             )
 
             async for chunk in response:
@@ -112,13 +110,59 @@ class LLMEngine:
 
                 if getattr(delta, "tool_calls", None):
                     for tc in delta.tool_calls:
-                        name = tc.function.name if tc.function else None
-                        args_raw = tc.function.arguments if tc.function else "{}"
-                        try:
-                            args = json.loads(args_raw) if args_raw else {}
-                        except json.JSONDecodeError:
-                            args = {"_raw": args_raw}
-                        yield json.dumps({"type": "tool_call", "name": name, "args": args})
+                        idx = tc.index
+                        if idx not in tool_calls:
+                            tool_calls[idx] = {"id": tc.id, "name": tc.function.name, "arguments": ""}
+                        if tc.function.arguments:
+                            tool_calls[idx]["arguments"] += tc.function.arguments
+
+            # Execute tools if requested
+            if tool_calls:
+                assistant_message = {"role": "assistant", "content": None, "tool_calls": []}
+                for idx, tc in tool_calls.items():
+                    assistant_message["tool_calls"].append({
+                        "id": tc["id"],
+                        "type": "function",
+                        "function": {
+                            "name": tc["name"],
+                            "arguments": tc["arguments"]
+                        }
+                    })
+                messages.append(assistant_message)
+
+                for idx, tc in tool_calls.items():
+                    name = tc["name"]
+                    try:
+                        args = json.loads(tc["arguments"])
+                    except json.JSONDecodeError:
+                        args = {}
+                    
+                    yield json.dumps({"type": "token", "data": f"\n\n*(System: Executing {name}...)*\n"})
+                    
+                    result = await handle_tool_call(name, args)
+                    
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc["id"],
+                        "name": name,
+                        "content": json.dumps(result)
+                    })
+
+                # Follow-up LLM stream after tools
+                follow_up = await self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    temperature=self.temperature,
+                    stream=True,
+                    tools=TOOLS_SCHEMA
+                )
+                async for chunk in follow_up:
+                    if not chunk.choices:
+                        continue
+                    delta = chunk.choices[0].delta
+                    if getattr(delta, "content", None):
+                        full_reply += delta.content
+                        yield json.dumps({"type": "token", "data": delta.content})
 
             if full_reply:
                 self._session_history[session_id].append(
@@ -132,6 +176,5 @@ class LLMEngine:
                 "data": f"LLM connection failed. Ensure {self.provider} is running.",
             })
 
-
-# Backwards-compatible alias, in case anything else still imports the old name.
+# Backwards-compatible alias
 LLMService = LLMEngine

@@ -28,6 +28,8 @@ const micBtn      = document.getElementById('mic-btn');
 const iconIdle    = document.getElementById('icon-idle');
 const iconRunning = document.getElementById('icon-running');
 const iconMic     = document.getElementById('icon-mic');
+const replyBox    = document.getElementById('reply-box');
+const replyContent = document.getElementById('reply-content');
 
 /* ── Platform detection ─────────────────────────────────────────── */
 const platform = (() => {
@@ -92,6 +94,8 @@ function dispatchQuery(query) {
   histIndex = -1;
 
   setStatus('RUNNING');
+  if (replyContent) replyContent.textContent = '';
+
 
   // IPC bridge — preload API (contextIsolation: true)
   if (window.electronAPI?.dispatch) {
@@ -114,6 +118,9 @@ function dispatchQuery(query) {
 function hideOverlay() {
   input.value = '';
   histIndex   = -1;
+  if (replyBox) replyBox.classList.add('hidden');
+  if (replyContent) replyContent.textContent = '';
+  if (window.electronAPI?.resizeWindow) window.electronAPI.resizeWindow(68);
   setStatus('IDLE');
   stopListening();
 
@@ -174,7 +181,13 @@ input.addEventListener('keydown', (e) => {
     case 'l':
     case 'L': {
       const mod = IS_MAC ? e.metaKey : e.ctrlKey;
-      if (mod) { e.preventDefault(); input.value = ''; }
+      if (mod) { 
+        e.preventDefault(); 
+        input.value = ''; 
+        if (replyBox) replyBox.classList.add('hidden');
+        if (replyContent) replyContent.textContent = '';
+        if (window.electronAPI?.resizeWindow) window.electronAPI.resizeWindow(68);
+      }
       break;
     }
   }
@@ -261,7 +274,19 @@ if (window.electronAPI) {
   window.electronAPI.onConnectionState?.((live)    => setConnected(live));
   window.electronAPI.onOverlayShow?.(() => {
     setStatus('IDLE');
+    if (replyBox) replyBox.classList.add('hidden');
+    if (window.electronAPI?.resizeWindow) window.electronAPI.resizeWindow(68);
     requestAnimationFrame(() => input.focus());
+  });
+  window.electronAPI.onReplyChunk?.((chunk) => {
+    if (replyBox && replyBox.classList.contains('hidden')) {
+      replyBox.classList.remove('hidden');
+      if (window.electronAPI?.resizeWindow) window.electronAPI.resizeWindow(400);
+    }
+    if (replyContent) {
+      replyContent.textContent += chunk;
+      replyBox.scrollTop = replyBox.scrollHeight;
+    }
   });
 }
 

@@ -16,6 +16,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.send('romanov:dispatch', query);
   },
   hideOverlay: () => ipcRenderer.send('romanov:hide'),
+  resizeWindow: (height) => ipcRenderer.send('romanov:resize-window', height),
 
   // main -> renderer
   onStatusUpdate: (callback) =>
@@ -28,8 +29,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('romanov:show', () => callback()),
 
   // extras (optional — only used if you wire live token streaming)
-  onStreamChunk: (callback) =>
-    ipcRenderer.on('romanov:stream-chunk', (_event, chunk) => callback(chunk)),
+  onReplyChunk: (callback) =>
+    ipcRenderer.on('romanov:reply-chunk', (_event, chunk) => callback(chunk)),
+  onReplyEnd: (callback) =>
+    ipcRenderer.on('romanov:reply-end', () => callback()),
   onError: (callback) =>
     ipcRenderer.on('romanov:error', (_event, message) => callback(message)),
 });

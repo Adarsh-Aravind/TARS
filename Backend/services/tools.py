@@ -1,4 +1,42 @@
 import sys
+
+TOOLS_SCHEMA = [
+    {
+        "type": "function",
+        "function": {
+            "name": "launch_app",
+            "description": "Launch an application securely across platforms.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "app_name": {
+                        "type": "string",
+                        "description": "The name of the application or command to launch (e.g., 'notepad', 'calc', 'chrome')."
+                    }
+                },
+                "required": ["app_name"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_volume",
+            "description": "Set system volume (0-100).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "level": {
+                        "type": "integer",
+                        "description": "The volume level from 0 to 100."
+                    }
+                },
+                "required": ["level"]
+            }
+        }
+    }
+]
+
 import subprocess
 import os
 import json
@@ -10,9 +48,24 @@ async def launch_app(app_name: str) -> Dict[str, Any]:
     """
     Launch an application securely across platforms.
     """
-    # Security: Strict regex whitelist for alphanumeric characters and hyphens/underscores
-    if not re.match(r"^[a-zA-Z0-9_\-\.\s]+$", app_name):
-        return {"status": "error", "message": "Invalid app name formatting."}
+    # Map common conversational names to actual executable names or URLs
+    COMMON_ALIASES = {
+        "file explorer": "explorer",
+        "explorer": "explorer",
+        "calculator": "calc",
+        "notepad": "notepad",
+        "youtube": "https://www.youtube.com",
+        "google": "https://www.google.com",
+        "browser": "https://www.google.com"
+    }
+
+    app_name_lower = app_name.lower().strip()
+    if app_name_lower in COMMON_ALIASES:
+        app_name = COMMON_ALIASES[app_name_lower]
+
+    # Security: Allow alphanumeric, hyphens, underscores, dots, spaces, and basic URL characters (:, /)
+    if not re.match(r"^[a-zA-Z0-9_\-\.\s\:\/]+$", app_name):
+        return {"status": "error", "message": f"Invalid app name formatting: {app_name}"}
 
     try:
         if sys.platform == "win32":
