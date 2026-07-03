@@ -75,6 +75,9 @@ async def chat_stream(request: ChatRequest):
 async def transcribe_audio():
     """
     Stub for audio transcription (e.g., local Faster-Whisper).
+    """
+    return {"status": "stub", "message": "Transcription endpoint not fully implemented yet."}
+
 import edge_tts
 import speech_recognition as sr
 
