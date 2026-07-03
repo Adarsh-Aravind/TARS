@@ -20,22 +20,36 @@ contextBridge.exposeInMainWorld('electronAPI', {
   resizeWindow: (height) => ipcRenderer.send('tars:resize-window', height),
 
   // main -> renderer
-  onStatusUpdate: (callback) =>
-    ipcRenderer.on('tars:status', (_event, key) => callback(key)),
-  onNetworkUpdate: (callback) =>
-    ipcRenderer.on('tars:network', (_event, addr) => callback(addr)),
-  onConnectionState: (callback) =>
-    ipcRenderer.on('tars:connected', (_event, live) => callback(live)),
-  onOverlayShow: (callback) =>
-    ipcRenderer.on('tars:show', () => callback()),
+  onStatusUpdate: (callback) => {
+    ipcRenderer.removeAllListeners('tars:status');
+    ipcRenderer.on('tars:status', (_event, key) => callback(key));
+  },
+  onNetworkUpdate: (callback) => {
+    ipcRenderer.removeAllListeners('tars:network');
+    ipcRenderer.on('tars:network', (_event, addr) => callback(addr));
+  },
+  onConnectionState: (callback) => {
+    ipcRenderer.removeAllListeners('tars:connected');
+    ipcRenderer.on('tars:connected', (_event, live) => callback(live));
+  },
+  onOverlayShow: (callback) => {
+    ipcRenderer.removeAllListeners('tars:show');
+    ipcRenderer.on('tars:show', () => callback());
+  },
 
   // extras (optional — only used if you wire live token streaming)
-  onReplyChunk: (callback) =>
-    ipcRenderer.on('tars:reply-chunk', (_event, chunk) => callback(chunk)),
-  onReplyEnd: (callback) =>
-    ipcRenderer.on('tars:reply-end', () => callback()),
-  onError: (callback) =>
-    ipcRenderer.on('tars:error', (_event, message) => callback(message)),
+  onReplyChunk: (callback) => {
+    ipcRenderer.removeAllListeners('tars:reply-chunk');
+    ipcRenderer.on('tars:reply-chunk', (_event, chunk) => callback(chunk));
+  },
+  onReplyEnd: (callback) => {
+    ipcRenderer.removeAllListeners('tars:reply-end');
+    ipcRenderer.on('tars:reply-end', () => callback());
+  },
+  onError: (callback) => {
+    ipcRenderer.removeAllListeners('tars:error');
+    ipcRenderer.on('tars:error', (_event, message) => callback(message));
+  }
 });
 
 // Fix: overlay.html ships with <body class="preview-bg"> for browser

@@ -16,6 +16,8 @@ const {
 } = require('electron');
 const path = require('path');
 const http = require('http');
+const net = require('net');
+const { spawn } = require('child_process');
 
 // ---------------------------------------------------------------------------
 // Config
@@ -24,13 +26,40 @@ const WINDOW_WIDTH = 700;
 const WINDOW_HEIGHT = 480;
 const HOTKEY = 'Alt+Space';
 const BACKEND_HOST = '127.0.0.1';
-const BACKEND_PORT = 8000;
-const BACKEND_HEALTH_URL = `http://${BACKEND_HOST}:${BACKEND_PORT}/health`;
+let BACKEND_PORT = 8000;
+let BACKEND_HEALTH_URL = `http://${BACKEND_HOST}:${BACKEND_PORT}/health`;
 const HEALTH_POLL_MS = 5000;
 
 let mainWindow = null;
 let tray = null;
 let isQuitting = false;
+let backendProcess = null;
+
+function getFreePort() {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.listen(0, '127.0.0.1', () => {
+      const port = srv.address().port;
+      srv.close(() => resolve(port));
+    });
+    srv.on('error', reject);
+  });
+}
+
+function spawnBackend(port) {
+  const dbPath = path.join(app.getPath('userData'), 'tars.db');
+  const pythonExecutable = process.platform === 'win32' ? 'python' : 'python3';
+  const scriptPath = path.join(__dirname, '..', 'Backend', 'Main.py');
+  
+  backendProcess = spawn(pythonExecutable, [scriptPath], {
+    env: { ...process.env, PORT: port.toString(), SQLITE_PATH: dbPath },
+    stdio: 'inherit'
+  });
+  
+  backendProcess.on('close', (code) => {
+    console.log(`[TARS] Backend process exited with code ${code}`);
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Window creation
@@ -278,7 +307,6 @@ function createTray() {
 // ---------------------------------------------------------------------------
 // Wake-word process listener
 // ---------------------------------------------------------------------------
-const { spawn } = require('child_process');
 let wakeProcess = null;
 
 function startWakeWordListener() {
@@ -327,22 +355,33 @@ app.whenReady().then(() => {
     }
   });
 
-  createWindow();
-  createTray();
-  registerIpcHandlers();
-  startWakeWordListener();
+  getFreePort().then(port => {
+    BACKEND_PORT = port;
+    BACKEND_HEALTH_URL = `http://${BACKEND_HOST}:${BACKEND_PORT}/health`;
+    spawnBackend(BACKEND_PORT);
+  }).catch(err => {
+    console.error("Failed to assign port:", err);
+  }).finally(() => {
+    createWindow();
+    createTray();
+    registerIpcHandlers();
+    startWakeWordListener();
 
-  const registered = globalShortcut.register(HOTKEY, toggleOverlay);
-  if (!registered) {
-    console.error(`[TARS] Failed to register global shortcut: ${HOTKEY}`);
-  }
+    const registered = globalShortcut.register(HOTKEY, toggleOverlay);
+    if (!registered) {
+      console.error(`[TARS] Failed to register global shortcut: ${HOTKEY}`);
+    }
 
-  pollBackendHealth();
-  setInterval(pollBackendHealth, HEALTH_POLL_MS);
+    pollBackendHealth();
+    setInterval(pollBackendHealth, HEALTH_POLL_MS);
+  });
 });
 
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
+  if (backendProcess) {
+    backendProcess.kill();
+  }
   if (wakeProcess) {
     wakeProcess.kill();
   }
@@ -354,6 +393,9 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   isQuitting = true;
+  if (backendProcess) {
+    backendProcess.kill();
+  }
   if (wakeProcess) {
     wakeProcess.kill();
   }

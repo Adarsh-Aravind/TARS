@@ -2,6 +2,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 import uvicorn
+import os
 
 from config import settings
 from db.database import init_db
@@ -27,15 +28,10 @@ app = FastAPI(
 )
 
 # CORS Middleware (Allow frontend to connect)
-# Explicitly allowing local development origins like localhost:3000 and localhost:5173
+# Safe for local usage since it binds to 127.0.0.1
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://localhost:5173",
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:5173",
-    ],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -59,4 +55,5 @@ async def health_check():
     }
 
 if __name__ == "__main__":
-    uvicorn.run("Main:app", host="0.0.0.0", port=8000, reload=True)
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("Main:app", host="127.0.0.1", port=port, reload=True)
