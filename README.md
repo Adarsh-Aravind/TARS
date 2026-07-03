@@ -2,127 +2,79 @@
 
 > A shared repo among us friends to learn by interacting and building together.
 
-A lightweight, frameless **Electron automation command overlay** that floats over your desktop on demand — summoned via a global hotkey (`Alt + Space`). Designed for both **macOS** and **Windows**.
+A lightweight, frameless **AI desktop assistant overlay** that floats over your screen on demand — summoned via a global hotkey (`Alt + Space`). Designed for both **macOS** and **Windows**, powered by a local FastAPI backend and Ollama.
 
 ---
 
 ## ✦ What it looks like
 
 A single, compact **750 × 68 px** horizontal pill — pure glass, zero chrome. Think Siri meets TARS.
+When the AI replies, the UI seamlessly scales downward to display a conversational response box.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│  ● SYS.READY  │  Awaiting automation query or terminal sequence...  │ BACKEND TUNNEL │
-│    OP.IDLE    │                                                      │ 127.0.0.1:8000 ●│
+│  ● SYS.READY  │  Awaiting automation query or terminal sequence...  │ 🎙️    │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 - **Left** — Live telemetry dot + system status labels  
 - **Center** — Transparent command input  
-- **Right** — Backend network bridge address + live connection dot  
+- **Right** — Voice Input Mic + Backend network bridge  
 
 ---
 
-## ✦ Frontend Structure
+## ✦ Features
+
+- **Live LLM Streaming (SSE)**: Fully asynchronous Server-Sent Events stream from the FastAPI backend to render tokens in real-time.
+- **Dynamic UI Resizing**: The Electron shell automatically resizes to expand and collapse the reply box based on interaction state.
+- **Tool Execution**: The LLM securely interfaces with your operating system. You can ask it to "Open File Explorer" or "Launch YouTube", and it will autonomously trigger the tool locally and summarize its actions!
+- **System Tray Integration**: Quietly runs in your system tray without cluttering the taskbar.
+- **Voice Input**: Integrated Speech-to-Text via the Web Speech API *(Note: requires Google API keys for Electron on Windows, or a local Whisper endpoint)*.
+- **Glassmorphism 2.0**: Native Window 11 Acrylic and macOS HUD Vibrancy.
+
+---
+
+## ✦ Architecture
 
 ```
 ROMANOV/
-└── frontend/
-    ├── overlay.html   ← Lean HTML shell (semantic, ARIA, CSP header)
-    ├── styles.css     ← Full design system (glassmorphism, shadows, animations)
-    └── renderer.js    ← Input logic, Electron IPC bridge, platform detection
+├── Electron/
+│   ├── Main.js        ← Main process (Tray, Window resizing, SSE Parsing)
+│   ├── Preload.js     ← Context bridge API for secure IPC
+│   └── Package.json   ← Electron dependencies
+├── frontend/
+│   ├── overlay.html   ← Lean HTML shell (semantic, ARIA, CSP header)
+│   ├── styles.css     ← Full design system (glassmorphism, animations)
+│   └── renderer.js    ← UI input, IPC bridge, Web Speech API integration
+└── Backend/
+    ├── Main.py        ← FastAPI entry point
+    ├── api/           ← Routes (SSE stream, audio stubs)
+    └── services/      
+        ├── llm.py     ← AsyncOpenAI integration with Tool Calling engine
+        └── tools.py   ← OS execution layer (launch_app, set_volume)
 ```
-
-### `overlay.html`
-- Frameless, fully transparent Electron window target
-- Semantic HTML5 with ARIA roles (`dialog`, `search`, `aria-live`)
-- Content Security Policy meta tag pre-configured
-- Remove `preview-bg` from `<body>` when loading in Electron
-
-### `styles.css`
-- **Glassmorphism 2.0** — `backdrop-filter: blur(44px) saturate(220%)`
-- **Neumorphic depth** — 6-layer box-shadow stack (ambient + inset bevel)
-- **Design tokens** — all colors, fonts, and spacing as CSS custom properties
-- Cross-platform fixes — autofill flash, Windows scrollbar, High Contrast mode
-- Full animation suite — pulse dot, halo ring, CRT flicker, slide-in entry
-
-### `renderer.js`
-- Dual IPC mode — works with `contextIsolation: true` (preload API) **and** `nodeIntegration: true` (raw `ipcRenderer`)
-- Command history — `↑`/`↓` arrows cycle the last 50 dispatched queries
-- Keyboard shortcuts — `Enter` dispatch · `Escape` hide · `Ctrl/Cmd+L` clear
-- Status machine — `IDLE` → `RUNNING` → `DONE` / `ERROR` driven by IPC events
-- Platform detection — macOS vs Windows micro-adjustments applied at runtime
 
 ---
 
-## ✦ Electron Setup
+## ✦ Running the Project
 
-### `BrowserWindow` options
-
-```js
-const { BrowserWindow } = require('electron');
-const path = require('path');
-
-const overlay = new BrowserWindow({
-  width:  750,
-  height: 68,
-  frame:       false,         // no title bar
-  transparent: true,          // glass works
-  backgroundColor: '#00000000',
-  hasShadow:   false,         // macOS: CSS handles shadows
-  alwaysOnTop: true,
-  skipTaskbar: true,
-
-  // Windows 11 acrylic blur
-  backgroundMaterial: 'acrylic',
-
-  // macOS vibrancy
-  // vibrancy: 'under-window',
-
-  webPreferences: {
-    contextIsolation: true,
-    nodeIntegration:  false,
-    preload: path.join(__dirname, 'preload.js'),
-  },
-});
-
-overlay.loadFile('frontend/overlay.html');
-overlay.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+### 1. Backend
+Requires `python 3.10+` and `uvicorn`. Ensure you have an Ollama instance running.
+```bash
+cd Backend
+pip install -r requirements.txt
+python Main.py
 ```
+*(Runs on http://127.0.0.1:8000)*
 
-### `preload.js` (contextBridge API)
-
-```js
-const { contextBridge, ipcRenderer } = require('electron');
-
-contextBridge.exposeInMainWorld('electronAPI', {
-  dispatch:          (query)    => ipcRenderer.send('romanov:dispatch', query),
-  hideOverlay:       ()         => ipcRenderer.send('romanov:hide'),
-  onStatusUpdate:    (callback) => ipcRenderer.on('romanov:status',    (_, v) => callback(v)),
-  onNetworkUpdate:   (callback) => ipcRenderer.on('romanov:network',   (_, v) => callback(v)),
-  onConnectionState: (callback) => ipcRenderer.on('romanov:connected', (_, v) => callback(v)),
-  onOverlayShow:     (callback) => ipcRenderer.on('romanov:show',      ()     => callback()),
-});
+### 2. Frontend (Electron)
+Requires `node` and `npm`.
+```bash
+cd Electron
+npm install
+npm start
 ```
-
-### Global hotkey (`Alt + Space`)
-
-```js
-const { globalShortcut, BrowserWindow } = require('electron');
-
-app.whenReady().then(() => {
-  globalShortcut.register('Alt+Space', () => {
-    const win = BrowserWindow.getAllWindows()[0];
-    if (win.isVisible()) {
-      win.hide();
-    } else {
-      win.show();
-      win.focus();
-      win.webContents.send('romanov:show');
-    }
-  });
-});
-```
+*(Runs in the system tray. Use `Alt + Space` to summon!)*
 
 ---
 
@@ -132,10 +84,11 @@ app.whenReady().then(() => {
 |---|---|---|---|
 | `romanov:dispatch` | renderer → main | `string` | User-submitted command query |
 | `romanov:hide` | renderer → main | — | Request to hide the overlay window |
+| `romanov:resize-window` | renderer → main | `integer` | Resizes the transparent shell |
 | `romanov:show` | main → renderer | — | Overlay shown — re-focus input |
-| `romanov:status` | main → renderer | `string` (key) | Status key: `IDLE` `RUNNING` `SYNCING` `ERROR` `DONE` |
-| `romanov:network` | main → renderer | `string` | New network address e.g. `192.168.1.5:9000` |
-| `romanov:connected` | main → renderer | `boolean` | Backend connection live/dead |
+| `romanov:status` | main → renderer | `string` (key) | Status key: `IDLE` `RUNNING` `DONE` `ERROR` |
+| `romanov:reply-chunk` | main → renderer | `string` | A live text token from the LLM |
+| `romanov:reply-end` | main → renderer | — | Marks the end of a response stream |
 
 ---
 
@@ -143,32 +96,11 @@ app.whenReady().then(() => {
 
 | Key | Action |
 |---|---|
+| `Alt+Space` | Global toggle: Show/Hide ROMANOV from anywhere |
 | `Enter` | Dispatch command to backend |
-| `Escape` | Clear input and hide overlay |
+| `Escape` | Clear input, hide reply box, and hide overlay |
 | `↑` / `↓` | Cycle command history (last 50) |
-| `Ctrl+L` / `Cmd+L` | Clear input field |
-
----
-
-## ✦ Browser Preview
-
-Open `frontend/overlay.html` directly in Chrome/Edge to preview without Electron.  
-The `preview-bg` class on `<body>` renders a dark radial gradient background so the glass effect is visible.
-
-> Remove `class="preview-bg"` from `<body>` before loading in Electron.
-
----
-
-## ✦ Tech Stack
-
-| Layer | Technology |
-|---|---|
-| Shell | HTML5 (semantic, ARIA) |
-| Styles | Vanilla CSS + Tailwind CSS (CDN) |
-| Scripts | Vanilla JS (ES2020, no bundler required) |
-| Runtime | Electron (Chromium renderer) |
-| Font | JetBrains Mono → Consolas → SF Mono (fallback chain) |
-| Platforms | macOS 12+ · Windows 10/11 |
+| `Ctrl+L` / `Cmd+L` | Clear input field and dismiss reply box |
 
 ---
 
