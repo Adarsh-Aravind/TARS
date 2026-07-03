@@ -10,7 +10,27 @@
     "lint": "oxlint",
     "preview": "vite preview",
     "electron:start": "cross-env NODE_ENV=development electron .",
-    "electron": "concurrently \"npm run dev\" \"wait-on tcp:5173 && npm run electron:start\""
+    "electron": "concurrently \"npm run dev\" \"wait-on tcp:5173 && npm run electron:start\"",
+    "dist:win": "npm run build && electron-builder --win",
+    "dist:mac": "npm run build && electron-builder --mac"
+  },
+  "build": {
+    "appId": "com.tars.overlay",
+    "productName": "TARS",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*"
+    ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "target": "dmg"
+    },
+    "win": {
+      "target": "nsis"
+    }
   },
   "dependencies": {
     "framer-motion": "^12.42.2",
@@ -27,6 +47,7 @@
     "concurrently": "^10.0.3",
     "cross-env": "^10.1.0",
     "electron": "^43.0.0",
+    "electron-builder": "^26.15.3",
     "oxlint": "^1.71.0",
     "postcss": "^8.5.16",
     "tailwindcss": "^4.3.2",

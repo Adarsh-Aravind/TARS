@@ -144,3 +144,8 @@ wheels/
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# Kokoro voice models
+kokoro-v0_19.onnx
+voices.json
+restart_trigger.txt

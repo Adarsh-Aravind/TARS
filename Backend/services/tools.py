@@ -34,6 +34,23 @@ TOOLS_SCHEMA = [
                 "required": ["level"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_system_command",
+            "description": "Execute a terminal/shell command (PowerShell on Windows) to perform file operations (rename, move, delete), system tasks, or open complex applications.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "The command line string to execute."
+                    }
+                },
+                "required": ["command"]
+            }
+        }
     }
 ]
 
@@ -124,5 +141,33 @@ async def handle_tool_call(tool_name: str, arguments: Dict[str, Any]) -> Dict[st
         return await launch_app(arguments.get("app_name", ""))
     elif tool_name == "set_volume":
         return await set_volume(arguments.get("level", 50))
+    elif tool_name == "run_system_command":
+        command = arguments.get("command", "")
+        if not command:
+            return {"status": "error", "message": "Command cannot be empty"}
+        try:
+            # Use PowerShell explicitly on Windows for robust command execution
+            shell_cmd = ["powershell", "-Command", command] if sys.platform == "win32" else command
+            process = await asyncio.create_subprocess_exec(
+                *shell_cmd if isinstance(shell_cmd, list) else shell_cmd,
+                stdout=asyncio.subprocess.PIPE, 
+                stderr=asyncio.subprocess.PIPE,
+                shell=not isinstance(shell_cmd, list)
+            )
+            stdout, stderr = await process.communicate()
+            
+            output = ""
+            if stdout:
+                output += f"Output:\n{stdout.decode('utf-8', errors='replace').strip()}"
+            if stderr:
+                output += f"\nErrors:\n{stderr.decode('utf-8', errors='replace').strip()}"
+                
+            return {
+                "status": "success" if process.returncode == 0 else "error", 
+                "message": output.strip() or "Command executed successfully with no output",
+                "exit_code": process.returncode
+            }
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
     else:
         return {"status": "error", "message": f"Unknown tool: {tool_name}"}

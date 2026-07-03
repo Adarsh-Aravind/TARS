@@ -25,7 +25,13 @@ const { spawn } = require('child_process');
 const WINDOW_WIDTH = 700;
 const WINDOW_HEIGHT = 480;
 const HOTKEY = 'Alt+Space';
-const BACKEND_HOST = '127.0.0.1';
+
+// DYNAMIC CROSS-OS ROUTING:
+// True if running on your MacBook; False if running on Dev 1's Windows PC.
+const IS_MAC = process.platform === 'darwin';
+
+// Mac hooks directly into Dev 1's LAN IP. Windows hooks into local loopback.
+const BACKEND_HOST = IS_MAC ? '192.168.0.208' : '127.0.0.1';
 let BACKEND_PORT = 8000;
 let BACKEND_HEALTH_URL = `http://${BACKEND_HOST}:${BACKEND_PORT}/health`;
 const HEALTH_POLL_MS = 5000;
@@ -35,6 +41,7 @@ let tray = null;
 let isQuitting = false;
 let backendProcess = null;
 
+// Only utilized on Windows to dynamically find an unbound socket port
 function getFreePort() {
   return new Promise((resolve, reject) => {
     const srv = net.createServer();
@@ -46,9 +53,15 @@ function getFreePort() {
   });
 }
 
+// Spawns Python locally ONLY on Windows. Instantly safe-exits on Mac.
 function spawnBackend(port) {
+  if (IS_MAC) {
+    console.log('[TARS] Distributed pipeline mode: Skipping local Python backend spawn.');
+    return;
+  }
+
   const dbPath = path.join(app.getPath('userData'), 'tars.db');
-  const pythonExecutable = process.platform === 'win32' ? 'python' : 'python3';
+  const pythonExecutable = 'python'; // Windows ecosystem executable standard
   const scriptPath = path.join(__dirname, '..', 'Backend', 'Main.py');
   
   backendProcess = spawn(pythonExecutable, [scriptPath], {
@@ -84,17 +97,11 @@ function createWindow() {
     maximizable: false,
     fullscreenable: false,
     skipTaskbar: true,
-    show: false, // start hidden — this IS the "pop up" behavior
+    show: false, 
     alwaysOnTop: true,
     hasShadow: false,
     backgroundColor: '#00000000',
     roundedCorners: true,
-    // NOTE: intentionally NOT using native `vibrancy` here. It fights with
-    // the CSS backdrop-filter glassmorphism already built into styles.css —
-    // the two compositing layers together caused the black-flash-until-drag
-    // bug. Let CSS own the glass effect entirely.
-    // Windows 11 acrylic (Electron >= 27 via backgroundMaterial) is fine to
-    // keep since Windows doesn't have the same conflict.
     backgroundMaterial: process.platform === 'win32' ? 'acrylic' : undefined,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -105,10 +112,6 @@ function createWindow() {
     },
   });
 
-  // 'floating' (not 'screen-saver') — screen-saver level is the most
-  // aggressive always-on-top tier macOS has and interferes with normal
-  // focus/blur semantics, which is why outside clicks weren't hiding the
-  // window. 'floating' is what Spotlight/Alfred-style overlays use.
   mainWindow.setAlwaysOnTop(true, 'floating');
   mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
 
@@ -122,7 +125,6 @@ function createWindow() {
     mainWindow.loadFile(path.join(__dirname, '../frontend/dist/index.html'));
   }
 
-  // Hide (not close) when it loses focus — classic Spotlight/Siri behavior
   mainWindow.on('blur', () => {
     if (mainWindow && !mainWindow.webContents.isDevToolsFocused()) {
       hideOverlay();
@@ -147,8 +149,6 @@ function createWindow() {
 function showOverlay() {
   if (!mainWindow) return;
 
-  // Re-center on whichever display currently has the cursor, so it shows
-  // up near the user on multi-monitor setups.
   const cursorPoint = screen.getCursorScreenPoint();
   const display = screen.getDisplayNearestPoint(cursorPoint);
   const x = Math.round(display.workArea.x + (display.workAreaSize.width - WINDOW_WIDTH) / 2);
@@ -157,10 +157,7 @@ function showOverlay() {
 
   mainWindow.show();
   mainWindow.focus();
-  // Workaround for a known Electron/macOS bug: transparent windows can
-  // render as solid black until the compositor is forced to repaint (which
-  // is why dragging "revealed" the glass effect). A same-frame size nudge
-  // forces that repaint immediately on show, before the user ever sees it.
+  
   const [w, h] = mainWindow.getSize();
   mainWindow.setSize(w, h + 1);
   mainWindow.setSize(w, h);
@@ -187,12 +184,10 @@ function toggleOverlay() {
 // IPC — mirrors the 6 channels documented in the project README
 // ---------------------------------------------------------------------------
 function registerIpcHandlers() {
-  // renderer -> main: user submitted a command
   ipcMain.on('tars:dispatch', (_event, query) => {
     handleDispatch(query);
   });
 
-  // renderer -> main: explicit hide request (e.g. Escape key)
   ipcMain.on('tars:hide', () => {
     hideOverlay();
   });
@@ -265,8 +260,6 @@ async function handleDispatch(query) {
 // ---------------------------------------------------------------------------
 function sendNetworkStatus() {
   if (!mainWindow) return;
-  // renderer.js does `connLabel.textContent = addr` — must be a plain string,
-  // not an object.
   mainWindow.webContents.send('tars:network', `${BACKEND_HOST}:${BACKEND_PORT}`);
 }
 
@@ -286,7 +279,7 @@ function pollBackendHealth() {
 // Tray icon — lets the user quit / reopen without a Dock/taskbar presence
 // ---------------------------------------------------------------------------
 function createTray() {
-  const icon = nativeImage.createEmpty(); // swap in a real .png/.ico asset
+  const icon = nativeImage.createEmpty(); 
   tray = new Tray(icon.isEmpty() ? nativeImage.createEmpty() : icon);
   tray.setToolTip('TARS');
   const menu = Menu.buildFromTemplate([
@@ -308,45 +301,28 @@ function createTray() {
 // Wake-word process listener
 // ---------------------------------------------------------------------------
 let wakeProcess = null;
-
 function startWakeWordListener() {
-  const pythonBin = process.platform === 'win32' ? 'python' : 'python3';
+  // Safe-exit on Mac to prevent background crashes over missing dependencies
+  if (IS_MAC) return;
+
+  const pythonBin = 'python';
   const scriptPath = path.join(__dirname, '../Backend/wake_word.py');
 
-  console.log(`[TARS] Spawning wake-word listener process: ${pythonBin} ${scriptPath}`);
   wakeProcess = spawn(pythonBin, [scriptPath]);
-
   wakeProcess.stdout.on('data', (data) => {
     const text = data.toString().trim();
-    if (text.includes('WAKE')) {
-      console.log('[TARS] Wake word detected! Showing overlay window.');
-      showOverlay();
-    }
-  });
-
-  wakeProcess.stderr.on('data', (data) => {
-    console.error(`[TARS Wake Listener] ${data.toString().trim()}`);
-  });
-
-  wakeProcess.on('error', (err) => {
-    console.error('[TARS] Failed to start wake word listener process:', err);
-  });
-
-  wakeProcess.on('close', (code) => {
-    console.log(`[TARS] Wake word listener process exited with code ${code}`);
+    if (text.includes('WAKE')) showOverlay();
   });
 }
 
 // ---------------------------------------------------------------------------
-// App lifecycle
+// App lifecycle — Adaptive Cross-Platform Bootstrapper
 // ---------------------------------------------------------------------------
 app.whenReady().then(() => {
-  // macOS: hide the Dock icon so this behaves like a background utility
-  if (process.platform === 'darwin' && app.dock) {
+  if (IS_MAC && app.dock) {
     app.dock.hide();
   }
 
-  // Allow microphone access for Web Speech API
   session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
     if (permission === 'media') {
       callback(true);
@@ -355,50 +331,54 @@ app.whenReady().then(() => {
     }
   });
 
-  getFreePort().then(port => {
-    BACKEND_PORT = port;
-    BACKEND_HEALTH_URL = `http://${BACKEND_HOST}:${BACKEND_PORT}/health`;
-    spawnBackend(BACKEND_PORT);
-  }).catch(err => {
-    console.error("Failed to assign port:", err);
-  }).finally(() => {
+  if (IS_MAC) {
+    // macOS ROUTE: Hardcoded ports targeting Dev 1's remote host
     createWindow();
     createTray();
     registerIpcHandlers();
-    startWakeWordListener();
 
     const registered = globalShortcut.register(HOTKEY, toggleOverlay);
-    if (!registered) {
-      console.error(`[TARS] Failed to register global shortcut: ${HOTKEY}`);
-    }
+    if (!registered) console.error(`[TARS] Shortcut registration failed: ${HOTKEY}`);
 
+    sendNetworkStatus();
     pollBackendHealth();
     setInterval(pollBackendHealth, HEALTH_POLL_MS);
-  });
+  } else {
+    // WINDOWS ROUTE: Dynamic port validation and spawning of local engine
+    getFreePort().then(port => {
+      BACKEND_PORT = port;
+      BACKEND_HEALTH_URL = `http://${BACKEND_HOST}:${BACKEND_PORT}/health`;
+      spawnBackend(BACKEND_PORT);
+    }).catch(err => {
+      console.error("Failed to assign port:", err);
+    }).finally(() => {
+      createWindow();
+      createTray();
+      registerIpcHandlers();
+      startWakeWordListener();
+
+      const registered = globalShortcut.register(HOTKEY, toggleOverlay);
+      if (!registered) console.error(`[TARS] Shortcut registration failed: ${HOTKEY}`);
+
+      sendNetworkStatus();
+      pollBackendHealth();
+      setInterval(pollBackendHealth, HEALTH_POLL_MS);
+    });
+  }
 });
 
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
-  if (backendProcess) {
-    backendProcess.kill();
-  }
-  if (wakeProcess) {
-    wakeProcess.kill();
-  }
+  if (backendProcess) backendProcess.kill();
+  if (wakeProcess) wakeProcess.kill();
 });
 
-app.on('window-all-closed', () => {
-  // Keep the app alive in the tray on all platforms — it's a background overlay.
-});
+app.on('window-all-closed', () => {});
 
 app.on('before-quit', () => {
   isQuitting = true;
-  if (backendProcess) {
-    backendProcess.kill();
-  }
-  if (wakeProcess) {
-    wakeProcess.kill();
-  }
+  if (backendProcess) backendProcess.kill();
+  if (wakeProcess) wakeProcess.kill();
 });
 
 app.on('activate', () => {
