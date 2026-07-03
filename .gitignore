@@ -148,4 +148,5 @@ Thumbs.db
 # Kokoro voice models
 kokoro-v0_19.onnx
 voices.json
+voices.bin
 restart_trigger.txt

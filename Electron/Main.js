@@ -26,13 +26,11 @@ const WINDOW_WIDTH = 700;
 const WINDOW_HEIGHT = 480;
 const HOTKEY = 'Alt+Space';
 
-// DYNAMIC CROSS-OS ROUTING:
-// True if running on your MacBook; False if running on Dev 1's Windows PC.
+// DYNAMIC RUNTIME CROSS-OS DETECTION:
 const IS_MAC = process.platform === 'darwin';
 
-// Mac hooks directly into Dev 1's LAN IP. Windows hooks into local loopback.
-const BACKEND_HOST = IS_MAC ? '192.168.0.208' : '127.0.0.1';
-let BACKEND_PORT = 8000;
+const BACKEND_HOST = '127.0.0.1';
+let BACKEND_PORT = 8000; // Default fallback for Live Share port forwarding tunnels
 let BACKEND_HEALTH_URL = `http://${BACKEND_HOST}:${BACKEND_PORT}/health`;
 const HEALTH_POLL_MS = 5000;
 
@@ -41,7 +39,6 @@ let tray = null;
 let isQuitting = false;
 let backendProcess = null;
 
-// Only utilized on Windows to dynamically find an unbound socket port
 function getFreePort() {
   return new Promise((resolve, reject) => {
     const srv = net.createServer();
@@ -53,10 +50,10 @@ function getFreePort() {
   });
 }
 
-// Spawns Python locally ONLY on Windows. Instantly safe-exits on Mac.
 function spawnBackend(port) {
+  // If running on Mac, do not try to run Python locally.
   if (IS_MAC) {
-    console.log('[TARS] Distributed pipeline mode: Skipping local Python backend spawn.');
+    console.log('[TARS] Live Share Mode: Bypassing local Python backend spawn on macOS.');
     return;
   }
 
@@ -97,7 +94,7 @@ function createWindow() {
     maximizable: false,
     fullscreenable: false,
     skipTaskbar: true,
-    show: false, 
+    show: false, // start hidden — this IS the "pop up" behavior
     alwaysOnTop: true,
     hasShadow: false,
     backgroundColor: '#00000000',
@@ -301,17 +298,33 @@ function createTray() {
 // Wake-word process listener
 // ---------------------------------------------------------------------------
 let wakeProcess = null;
+
 function startWakeWordListener() {
-  // Safe-exit on Mac to prevent background crashes over missing dependencies
-  if (IS_MAC) return;
+  if (IS_MAC) {
+    console.log('[TARS] Live Share Mode: Bypassing wake-word listener background process on macOS.');
+    return;
+  }
 
   const pythonBin = 'python';
   const scriptPath = path.join(__dirname, '../Backend/wake_word.py');
 
+  console.log(`[TARS] Spawning wake-word listener process: ${pythonBin} ${scriptPath}`);
   wakeProcess = spawn(pythonBin, [scriptPath]);
+
   wakeProcess.stdout.on('data', (data) => {
     const text = data.toString().trim();
-    if (text.includes('WAKE')) showOverlay();
+    if (text.includes('WAKE')) {
+      console.log('[TARS] Wake word detected! Showing overlay window.');
+      showOverlay();
+    }
+  });
+
+  wakeProcess.stderr.on('data', (data) => {
+    console.error(`[TARS Wake Listener] ${data.toString().trim()}`);
+  });
+
+  wakeProcess.on('close', (code) => {
+    console.log(`[TARS] Wake word listener process exited with code ${code}`);
   });
 }
 
@@ -319,7 +332,7 @@ function startWakeWordListener() {
 // App lifecycle — Adaptive Cross-Platform Bootstrapper
 // ---------------------------------------------------------------------------
 app.whenReady().then(() => {
-  if (IS_MAC && app.dock) {
+  if (process.platform === 'darwin' && app.dock) {
     app.dock.hide();
   }
 
@@ -331,40 +344,20 @@ app.whenReady().then(() => {
     }
   });
 
-  if (IS_MAC) {
-    // macOS ROUTE: Hardcoded ports targeting Dev 1's remote host
-    createWindow();
-    createTray();
-    registerIpcHandlers();
+  // HARD OVERWRITE FOR YOUR MACBOOK LIVE SHARE SESSION:
+  // Point directly to the port forwarding loopback tunnel
+  BACKEND_PORT = 8000; 
+  BACKEND_HEALTH_URL = `http://${BACKEND_HOST}:${BACKEND_PORT}/health`;
+  
+  createWindow();
+  createTray();
+  registerIpcHandlers();
 
-    const registered = globalShortcut.register(HOTKEY, toggleOverlay);
-    if (!registered) console.error(`[TARS] Shortcut registration failed: ${HOTKEY}`);
+  const registered = globalShortcut.register(HOTKEY, toggleOverlay);
+  if (!registered) console.error(`[TARS] Shortcut registration failed: ${HOTKEY}`);
 
-    sendNetworkStatus();
-    pollBackendHealth();
-    setInterval(pollBackendHealth, HEALTH_POLL_MS);
-  } else {
-    // WINDOWS ROUTE: Dynamic port validation and spawning of local engine
-    getFreePort().then(port => {
-      BACKEND_PORT = port;
-      BACKEND_HEALTH_URL = `http://${BACKEND_HOST}:${BACKEND_PORT}/health`;
-      spawnBackend(BACKEND_PORT);
-    }).catch(err => {
-      console.error("Failed to assign port:", err);
-    }).finally(() => {
-      createWindow();
-      createTray();
-      registerIpcHandlers();
-      startWakeWordListener();
-
-      const registered = globalShortcut.register(HOTKEY, toggleOverlay);
-      if (!registered) console.error(`[TARS] Shortcut registration failed: ${HOTKEY}`);
-
-      sendNetworkStatus();
-      pollBackendHealth();
-      setInterval(pollBackendHealth, HEALTH_POLL_MS);
-    });
-  }
+  pollBackendHealth();
+  setInterval(pollBackendHealth, HEALTH_POLL_MS);
 });
 
 app.on('will-quit', () => {
