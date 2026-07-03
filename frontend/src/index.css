@@ -1,0 +1,97 @@
+@import "tailwindcss";
+
+@theme {
+  --color-cyber-black: #000000;
+  --color-cyber-dark: #050505;
+  --color-cyber-gray: #111111;
+  --color-cyber-border: rgba(255, 255, 255, 0.08);
+  --color-cyber-text: #ffffff;
+  --color-cyber-muted: rgba(255, 255, 255, 0.4);
+
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", "Courier New", monospace;
+}
+
+@utility glassmorphic-panel {
+  background: rgba(4, 4, 4, 0.85);
+  backdrop-filter: blur(40px);
+  -webkit-backdrop-filter: blur(40px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow:
+    /* Outer soft black shadow */
+    0 25px 50px -12px rgba(0, 0, 0, 0.95),
+    /* Inner Neumorphic shadows */
+    inset 2px 2px 5px rgba(255, 255, 255, 0.05),
+    inset -3px -3px 8px rgba(0, 0, 0, 0.9);
+}
+
+@utility neu-shadow-black {
+  box-shadow:
+    /* Deep outer shadows for the 3D feel on black background */
+    12px 12px 28px rgba(0, 0, 0, 0.95),
+    -6px -6px 20px rgba(255, 255, 255, 0.01),
+    0 0 35px rgba(255, 255, 255, 0.015);
+}
+
+@utility glow-white-line {
+  filter: drop-shadow(0 0 5px rgba(255, 255, 255, 0.5));
+}
+
+@utility glow-globe {
+  filter: drop-shadow(0 0 8px rgba(255, 255, 255, 0.35));
+}
+
+@utility no-scrollbar {
+  -ms-overflow-style: none;  /* IE and Edge */
+  scrollbar-width: none;  /* Firefox */
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+@utility cursor-blink {
+  &::after {
+    content: '|';
+    animation: blink 1s infinite;
+    color: #ffffff;
+    margin-left: 2px;
+  }
+}
+
+@utility pulse-mic-icon {
+  animation: pulse-mic 2s infinite ease-in-out;
+}
+
+@layer base {
+  html, body, #root {
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    background-color: transparent !important;
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+}
+
+/* Pulse animation for microphone */
+@keyframes pulse-mic {
+  0%, 100% {
+    opacity: 0.4;
+    transform: scale(1);
+    filter: drop-shadow(0 0 2px rgba(255, 255, 255, 0.3));
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.1);
+    filter: drop-shadow(0 0 8px rgba(255, 255, 255, 0.8));
+  }
+}
+
+/* Blinking cursor for command input and typewriter */
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}

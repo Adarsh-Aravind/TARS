@@ -20,8 +20,8 @@ const http = require('http');
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
-const WINDOW_WIDTH = 680;
-const WINDOW_HEIGHT = 88;
+const WINDOW_WIDTH = 700;
+const WINDOW_HEIGHT = 480;
 const HOTKEY = 'Alt+Space';
 const BACKEND_HOST = '127.0.0.1';
 const BACKEND_PORT = 8000;
@@ -83,7 +83,15 @@ function createWindow() {
   mainWindow.setAlwaysOnTop(true, 'floating');
   mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
 
-  mainWindow.loadFile(path.join(__dirname, '..', 'frontend', 'overlay.html'));
+  const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
+  if (isDev) {
+    mainWindow.loadURL('http://localhost:5173').catch(() => {
+      console.log('[TARS] Vite dev server not running, loading built index.html');
+      mainWindow.loadFile(path.join(__dirname, '../frontend/dist/index.html'));
+    });
+  } else {
+    mainWindow.loadFile(path.join(__dirname, '../frontend/dist/index.html'));
+  }
 
   // Hide (not close) when it loses focus — classic Spotlight/Siri behavior
   mainWindow.on('blur', () => {
@@ -268,6 +276,40 @@ function createTray() {
 }
 
 // ---------------------------------------------------------------------------
+// Wake-word process listener
+// ---------------------------------------------------------------------------
+const { spawn } = require('child_process');
+let wakeProcess = null;
+
+function startWakeWordListener() {
+  const pythonBin = process.platform === 'win32' ? 'python' : 'python3';
+  const scriptPath = path.join(__dirname, '../Backend/wake_word.py');
+
+  console.log(`[TARS] Spawning wake-word listener process: ${pythonBin} ${scriptPath}`);
+  wakeProcess = spawn(pythonBin, [scriptPath]);
+
+  wakeProcess.stdout.on('data', (data) => {
+    const text = data.toString().trim();
+    if (text.includes('WAKE')) {
+      console.log('[TARS] Wake word detected! Showing overlay window.');
+      showOverlay();
+    }
+  });
+
+  wakeProcess.stderr.on('data', (data) => {
+    console.error(`[TARS Wake Listener] ${data.toString().trim()}`);
+  });
+
+  wakeProcess.on('error', (err) => {
+    console.error('[TARS] Failed to start wake word listener process:', err);
+  });
+
+  wakeProcess.on('close', (code) => {
+    console.log(`[TARS] Wake word listener process exited with code ${code}`);
+  });
+}
+
+// ---------------------------------------------------------------------------
 // App lifecycle
 // ---------------------------------------------------------------------------
 app.whenReady().then(() => {
@@ -288,6 +330,7 @@ app.whenReady().then(() => {
   createWindow();
   createTray();
   registerIpcHandlers();
+  startWakeWordListener();
 
   const registered = globalShortcut.register(HOTKEY, toggleOverlay);
   if (!registered) {
@@ -300,6 +343,9 @@ app.whenReady().then(() => {
 
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
+  if (wakeProcess) {
+    wakeProcess.kill();
+  }
 });
 
 app.on('window-all-closed', () => {
@@ -308,6 +354,9 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   isQuitting = true;
+  if (wakeProcess) {
+    wakeProcess.kill();
+  }
 });
 
 app.on('activate', () => {
