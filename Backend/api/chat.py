@@ -26,14 +26,25 @@ async def chat_stream(request: ChatRequest):
     if not request.messages:
         raise HTTPException(status_code=400, detail="Messages list cannot be empty.")
 
-    # Convert Pydantic models to dicts for the service layer
-    messages_dict = [{"role": msg.role, "content": msg.content} for msg in request.messages]
+    # Extract the latest user message for the new LLMEngine
+    user_message = ""
+    for msg in reversed(request.messages):
+        if msg.role == "user":
+            user_message = msg.content
+            break
+
+    if not user_message:
+        raise HTTPException(status_code=400, detail="No user message found.")
 
     async def sse_generator():
         try:
-            async for chunk in llm_service.stream_response(messages_dict):
-                # Format as Server-Sent Events (SSE)
-                yield f"data: {json.dumps({'chunk': chunk})}\n\n"
+            async for chunk_str in LLMService.stream_response("default_sse_session", user_message):
+                chunk = json.loads(chunk_str)
+                if chunk.get("type") == "token":
+                    # Format as Server-Sent Events (SSE)
+                    yield f"data: {json.dumps({'chunk': chunk['data']})}\n\n"
+                elif chunk.get("type") == "error":
+                    yield f"event: error\ndata: {json.dumps({'detail': chunk['data']})}\n\n"
         except asyncio.CancelledError:
             # Client disconnected abruptly. Silence the error and exit cleanly.
             pass
