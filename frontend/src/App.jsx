@@ -20,6 +20,10 @@ export default function App() {
   const audioContext = useRef(null);
   const currentAudioSource = useRef(null);
 
+  // macOS renders the listening island as a solid-black notch-blended bar;
+  // every other platform gets a floating frosted-glass pill.
+  const isMac = typeof window !== 'undefined' && window.electronAPI?.platform === 'darwin';
+
   const stopAudio = () => {
      audioQueue.current = [];
      if (currentAudioSource.current) {
@@ -151,6 +155,12 @@ export default function App() {
       setInputText('');
       setReplyText('');
     }
+  }, [uiState]);
+
+  // Drive the main-process "voice mode": slide the window to the top-center of
+  // the screen (notch on macOS) and pin it open while we're listening.
+  useEffect(() => {
+    window.electronAPI?.setVoiceMode?.(uiState === 'VOICE_LISTENING');
   }, [uiState]);
 
   // Dispatch query to backend
@@ -291,8 +301,10 @@ export default function App() {
   if (uiState === 'HIDDEN') return null;
 
   return (
-    <div 
-      className="w-full h-full flex items-center justify-center bg-transparent"
+    <div
+      className={`w-full h-full flex justify-center bg-transparent ${
+        uiState === 'VOICE_LISTENING' ? 'items-start' : 'items-center'
+      }`}
       onKeyDown={handleKeyDown}
       onClick={handleClose}
     >
@@ -302,11 +314,11 @@ export default function App() {
         initial={{ opacity: 0, scale: 0.9 }}
         animate={
           uiState === 'TEXT_INPUT'
-            ? { borderRadius: '8px', width: 640, height: 64, scale: 1, opacity: 1, y: 0 }
+            ? { width: 640, height: 64, scale: 1, opacity: 1, y: 0 }
             : uiState === 'EXPANDED_CHAT'
-            ? { borderRadius: '8px', width: 640, height: 420, scale: 1, opacity: 1, y: 0 }
+            ? { width: 640, height: 420, scale: 1, opacity: 1, y: 0 }
             : uiState === 'VOICE_LISTENING'
-            ? { borderRadius: '60px', width: 120, height: 120, scale: 1, opacity: 1, y: -250 }
+            ? { width: isMac ? 380 : 340, height: 52, scale: 1, opacity: 1, y: isMac ? 0 : 10 }
             : { opacity: 0 }
         }
         transition={{
@@ -315,39 +327,76 @@ export default function App() {
           damping: 30,
           layout: { duration: 0.4, type: 'spring', stiffness: 280, damping: 28 }
         }}
-        style={{ WebkitAppRegion: 'drag' }}
-        className="glassmorphic-panel relative flex flex-col items-center justify-center overflow-hidden cursor-grab active:cursor-grabbing select-none"
+        style={{
+          WebkitAppRegion: 'drag',
+          // Radius is per-state: on macOS the listening island keeps a square
+          // top edge (flush under the notch) with rounded bottom corners.
+          borderRadius:
+            uiState === 'VOICE_LISTENING'
+              ? (isMac ? '0 0 20px 20px' : '26px')
+              : '12px',
+          // macOS listening island: solid black so it merges with the notch.
+          ...(uiState === 'VOICE_LISTENING' && isMac
+            ? { background: '#000', border: 'none', boxShadow: '0 10px 28px rgba(0,0,0,0.55)' }
+            : {}),
+        }}
+        className={`${
+          uiState === 'VOICE_LISTENING' && isMac ? '' : 'glassmorphic-panel'
+        } relative flex flex-col items-center justify-center overflow-hidden select-none ${
+          uiState === 'VOICE_LISTENING' ? 'cursor-pointer' : 'cursor-grab active:cursor-grabbing'
+        }`}
       >
         <AnimatePresence mode="wait">
           {uiState === 'VOICE_LISTENING' && (
             <motion.div
               key="voice-state"
-              initial={{ opacity: 0, scale: 0.5 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.5 }}
-              transition={{ duration: 0.3 }}
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.25 }}
               style={{ WebkitAppRegion: 'no-drag' }}
-              className="w-full h-full flex flex-col items-center justify-center cursor-pointer"
+              className={`w-full h-full flex items-center px-5 ${
+                isMac ? 'justify-between' : 'justify-center gap-3'
+              }`}
               onClick={() => setUiState('TEXT_INPUT')}
+              title="Click to type instead"
             >
-              <div className="relative w-16 h-16 flex items-center justify-center">
-                <motion.div 
-                  className="absolute inset-0 rounded-full bg-blue-500/40 mix-blend-screen blur-md"
-                  animate={{ scale: [1, 1.5, 1], rotate: [0, 90, 0] }}
-                  transition={{ duration: 2, repeat: Infinity, ease: "easeInOut" }}
-                />
-                <motion.div 
-                  className="absolute inset-0 rounded-full bg-purple-500/40 mix-blend-screen blur-md"
-                  animate={{ scale: [1.2, 0.8, 1.2], rotate: [0, -90, 0] }}
-                  transition={{ duration: 2.5, repeat: Infinity, ease: "easeInOut" }}
-                />
-                <motion.div 
-                  className="absolute inset-0 rounded-full bg-pink-500/40 mix-blend-screen blur-md"
-                  animate={{ scale: [0.9, 1.3, 0.9], rotate: [45, -45, 45] }}
-                  transition={{ duration: 1.8, repeat: Infinity, ease: "easeInOut" }}
-                />
-                <Mic size={24} className="relative z-10 text-white drop-shadow-lg" />
+              {/* Mic + live equalizer, grouped so they stay to one side of the
+                  notch on macOS. */}
+              <div className="flex items-center gap-3 shrink-0">
+                <motion.div
+                  animate={{ scale: [1, 1.15, 1] }}
+                  transition={{ duration: 1.6, repeat: Infinity, ease: 'easeInOut' }}
+                  className="text-white/90"
+                >
+                  <Mic size={16} />
+                </motion.div>
+
+                <div className="flex items-center justify-center gap-[3px] h-5">
+                  {[0, 1, 2, 3, 4, 5, 6].map((i) => (
+                    <motion.span
+                      key={i}
+                      className="w-[3px] h-full rounded-full bg-gradient-to-t from-blue-400 to-fuchsia-300"
+                      style={{ transformOrigin: 'bottom' }}
+                      animate={{ scaleY: [0.25, 1, 0.4, 0.85, 0.3] }}
+                      transition={{
+                        duration: 1.1,
+                        repeat: Infinity,
+                        ease: 'easeInOut',
+                        delay: i * 0.08,
+                      }}
+                    />
+                  ))}
+                </div>
               </div>
+
+              {/* Reserve the physical notch width on macOS so nothing renders
+                  behind the cutout. Tune 170px to your specific MacBook. */}
+              {isMac && <div aria-hidden className="w-[170px] shrink-0" />}
+
+              <span className="shrink-0 text-[10px] font-mono tracking-[0.2em] text-white/60 select-none">
+                LISTENING
+              </span>
             </motion.div>
           )}
 

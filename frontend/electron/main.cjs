@@ -17,6 +17,7 @@ let win = null;
 let tray = null;
 let backendProcess = null;
 let isQuitting = false;
+let voiceMode = false; // top-center "listening" mode — pins the window open
 
 // ---------------------------------------------------------------------------
 // Best-effort local backend spawn
@@ -70,6 +71,27 @@ function positionWindow() {
   win.setPosition(x, y);
 }
 
+// Voice "listening" mode: slide the (transparent) window to the top-center of
+// the screen so the glass listening island renders right at the top edge — and
+// on macOS flush to y=0 so it hugs / blends into the MacBook notch. Also pins
+// the window open (blur won't hide it) for the few seconds we're capturing.
+function setVoiceMode(active) {
+  voiceMode = active;
+  if (!win) return;
+  const cursor = screen.getCursorScreenPoint();
+  const display = screen.getDisplayNearestPoint(cursor);
+  const x = Math.round(display.bounds.x + (display.bounds.width - WINDOW_WIDTH) / 2);
+  if (active) {
+    // macOS: bounds.y is the physical screen top (the notch sits just above the
+    // menu bar), so y=0 lets the island tuck under/around it. Windows/Linux:
+    // use workArea so we clear the top of the screen cleanly.
+    const y = IS_MAC ? display.bounds.y : Math.round(display.workArea.y);
+    win.setPosition(x, y);
+  } else {
+    positionWindow();
+  }
+}
+
 function createWindow() {
   win = new BrowserWindow({
     width: WINDOW_WIDTH,
@@ -114,7 +136,9 @@ function createWindow() {
   // Hide when focus is lost (unless DevTools has focus), so it behaves like
   // Siri instead of a sticky window.
   win.on('blur', () => {
-    if (win && !win.webContents.isDevToolsFocused()) win.hide();
+    // Don't vanish mid-listen: while the voice island is up we're capturing
+    // from the mic and the window is intentionally unfocused-friendly.
+    if (win && !voiceMode && !win.webContents.isDevToolsFocused()) win.hide();
   });
 
   // Closing just hides — the tray keeps the app alive.
@@ -134,6 +158,7 @@ function showOverlay() {
 }
 
 function hideOverlay() {
+  voiceMode = false;
   if (win && win.isVisible()) win.hide();
 }
 
@@ -179,6 +204,7 @@ function createTray() {
 function registerIpcHandlers() {
   ipcMain.on('hide-overlay', () => hideOverlay());
   ipcMain.on('request-show', () => showOverlay());
+  ipcMain.on('set-voice-mode', (_event, active) => setVoiceMode(active));
 }
 
 // ---------------------------------------------------------------------------
