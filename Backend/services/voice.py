@@ -23,7 +23,8 @@ class VoiceEngine:
     def __init__(self):
         self.is_listening = False
         self.wakeup_event = threading.Event()
-        self.lock = threading.Lock()
+        self.lock = threading.Lock()      # guards start/stop state transitions
+        self.mic_lock = threading.Lock()  # serializes physical microphone access
         self.thread = None
         self._busy = False  # avoid piling up transcription threads
 
@@ -55,13 +56,20 @@ class VoiceEngine:
 
         while self.is_listening:
             try:
-                audio_data = sd.rec(
-                    int(samplerate * duration),
-                    samplerate=samplerate,
-                    channels=1,
-                    dtype="int16",
-                )
-                sd.wait()
+                # Hold the mic lock only for the actual capture so a foreground
+                # /audio/listen capture can never open a second overlapping
+                # InputStream on the same device (that races PortAudio and is
+                # the classic "wake word never fires after the first use" bug).
+                with self.mic_lock:
+                    if not self.is_listening:
+                        break
+                    audio_data = sd.rec(
+                        int(samplerate * duration),
+                        samplerate=samplerate,
+                        channels=1,
+                        dtype="int16",
+                    )
+                    sd.wait()
 
                 if not self.is_listening:
                     break
@@ -86,6 +94,22 @@ class VoiceEngine:
                 logging.error(f"VoiceEngine loop error: {e}")
                 time.sleep(1)
 
+    def record(self, duration: float, samplerate: int = 16000) -> np.ndarray:
+        """
+        Capture a single mono clip through the shared mic lock. Used by the
+        foreground /audio/listen path so it is serialized against the wake-word
+        loop instead of fighting it for the device. Blocking — run in a thread.
+        """
+        with self.mic_lock:
+            audio = sd.rec(
+                int(samplerate * duration),
+                samplerate=samplerate,
+                channels=1,
+                dtype="int16",
+            )
+            sd.wait()
+        return audio.reshape(-1)
+
     def start(self):
         with self.lock:
             if self.is_listening:
@@ -97,8 +121,17 @@ class VoiceEngine:
 
     def stop(self):
         with self.lock:
+            if not self.is_listening:
+                return
             self.is_listening = False
-            logging.info("VoiceEngine stopped.")
+            thread = self.thread
+        # Wait (outside self.lock, to avoid deadlocking start/stop) for the loop
+        # to finish its in-flight capture and release the mic. Without this the
+        # caller could grab the device while the loop's last sd.rec is still
+        # open. join timeout comfortably exceeds one capture block (2.5s).
+        if thread and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=4.0)
+        logging.info("VoiceEngine stopped.")
 
 
 voice_engine = VoiceEngine()

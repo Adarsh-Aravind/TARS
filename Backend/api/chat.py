@@ -1,5 +1,3 @@
-import io
-import wave
 import json
 import asyncio
 import logging
@@ -102,34 +100,32 @@ async def sse_events():
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
+def _capture_and_transcribe(duration: float, samplerate: int) -> str:
+    """
+    Blocking: capture one clip through the VoiceEngine's mic lock and run it
+    through local Whisper. Kept sync so it can be offloaded with to_thread and
+    never stall the async event loop (and the SSE /events poll) for 5s.
+    """
+    from services.transcription import transcribe_sync
+
+    mono = voice_engine.record(duration, samplerate)
+    wav_bytes = voice_engine._to_wav(mono, samplerate)
+    return transcribe_sync(wav_bytes)
+
+
 @router.get("/audio/listen")
 async def listen_for_command():
     """
     Called by the frontend when woken up. Records for a few seconds and
     transcribes locally with Whisper.
     """
+    # Fully stop (and join) the wake-word loop first so the mic is released
+    # before we open our own capture stream.
     voice_engine.stop()
     text = ""
     try:
-        import sounddevice as sd
-        from services.transcription import TranscriptionService
-
-        samplerate = 16000
-        duration = 5.0
-
         logger.info("[TARS] Listening for command...")
-        audio_data = sd.rec(int(samplerate * duration), samplerate=samplerate, channels=1, dtype="int16")
-        sd.wait()
-
-        # Wrap the raw PCM in a WAV container for Whisper.
-        buf = io.BytesIO()
-        with wave.open(buf, "wb") as wf:
-            wf.setnchannels(1)
-            wf.setsampwidth(2)
-            wf.setframerate(samplerate)
-            wf.writeframes(audio_data.tobytes())
-
-        text = await TranscriptionService.transcribe_audio(buf.getvalue())
+        text = await asyncio.to_thread(_capture_and_transcribe, 5.0, 16000)
         logger.info(f"[TARS] Heard: {text}")
     except Exception as e:
         logger.error(f"Error during command listening: {e}")
