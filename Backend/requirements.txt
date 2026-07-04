@@ -10,6 +10,8 @@ edge-tts
 faster-whisper
 pyperclip
 pygetwindow; sys_platform == 'win32'
+pycaw; sys_platform == 'win32'
+comtypes; sys_platform == 'win32'
 pyautogui
 python-multipart
 litellm

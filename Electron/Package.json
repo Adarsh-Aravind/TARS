@@ -2,7 +2,7 @@
   "name": "tars",
   "version": "0.1.0",
   "description": "Cross-platform frameless AI assistant overlay",
-  "main": "main.js",
+  "main": "Main.js",
   "author": "",
   "license": "MIT",
   "private": true,
@@ -19,8 +19,8 @@
     "appId": "com.tars.overlay",
     "productName": "TARS",
     "files": [
-      "main.js",
-      "preload.js",
+      "Main.js",
+      "Preload.js",
       "../frontend/**/*"
     ],
     "mac": {

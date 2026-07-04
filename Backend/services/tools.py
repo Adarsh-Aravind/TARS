@@ -65,20 +65,51 @@ async def launch_app(app_name: str) -> Dict[str, Any]:
     """
     Launch an application securely across platforms.
     """
-    # Map common conversational names to actual executable names or URLs
-    COMMON_ALIASES = {
+    # Map common conversational names to actual executable/app names or URLs.
+    # These differ by platform (e.g. "calc.exe" on Windows vs "Calculator.app"
+    # on macOS), so keep separate alias tables and pick the right one at runtime.
+    COMMON_ALIASES_WIN = {
         "file explorer": "explorer",
         "explorer": "explorer",
+        "finder": "explorer",
         "calculator": "calc",
         "notepad": "notepad",
         "youtube": "https://www.youtube.com",
         "google": "https://www.google.com",
-        "browser": "https://www.google.com"
+        "browser": "https://www.google.com",
+    }
+    COMMON_ALIASES_MAC = {
+        "file explorer": "Finder",
+        "explorer": "Finder",
+        "finder": "Finder",
+        "calculator": "Calculator",
+        "calc": "Calculator",
+        "notepad": "TextEdit",
+        "notes": "Notes",
+        "youtube": "https://www.youtube.com",
+        "google": "https://www.google.com",
+        "browser": "https://www.google.com",
+    }
+    COMMON_ALIASES_LINUX = {
+        "file explorer": "xdg-open .",
+        "explorer": "xdg-open .",
+        "calculator": "gnome-calculator",
+        "notepad": "gedit",
+        "youtube": "https://www.youtube.com",
+        "google": "https://www.google.com",
+        "browser": "https://www.google.com",
     }
 
+    if sys.platform == "win32":
+        aliases = COMMON_ALIASES_WIN
+    elif sys.platform == "darwin":
+        aliases = COMMON_ALIASES_MAC
+    else:
+        aliases = COMMON_ALIASES_LINUX
+
     app_name_lower = app_name.lower().strip()
-    if app_name_lower in COMMON_ALIASES:
-        app_name = COMMON_ALIASES[app_name_lower]
+    if app_name_lower in aliases:
+        app_name = aliases[app_name_lower]
 
     # Security: Allow alphanumeric, hyphens, underscores, dots, spaces, and basic URL characters (:, /)
     if not re.match(r"^[a-zA-Z0-9_\-\.\s\:\/]+$", app_name):
@@ -116,9 +147,27 @@ async def set_volume(level: Any) -> Dict[str, Any]:
     try:
         level = max(0, min(100, int(level)))
         if sys.platform == "win32":
-            # Requires a 3rd party tool like nircmd or a custom pycaw script.
-            # Using a stub for Windows volume control for now
-            return {"status": "success", "message": f"Volume set to {level}% (Stub on Windows)"}
+            try:
+                from ctypes import cast, POINTER
+                from comtypes import CLSCTX_ALL
+                from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+
+                def _set_windows_volume():
+                    devices = AudioUtilities.GetSpeakers()
+                    interface = devices.Activate(
+                        IAudioEndpointVolume._iid_, CLSCTX_ALL, None
+                    )
+                    volume = cast(interface, POINTER(IAudioEndpointVolume))
+                    volume.SetMasterVolumeLevelScalar(level / 100.0, None)
+
+                await asyncio.to_thread(_set_windows_volume)
+                return {"status": "success", "message": f"Volume set to {level}% on Windows"}
+            except ImportError:
+                return {
+                    "status": "error",
+                    "message": "Windows volume control requires 'pycaw' and 'comtypes'. "
+                                "Install with: pip install pycaw comtypes",
+                }
         elif sys.platform == "darwin":
             process = await asyncio.create_subprocess_exec(
                 "osascript", "-e", f"set volume output volume {level}",

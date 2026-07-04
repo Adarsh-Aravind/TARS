@@ -2,6 +2,14 @@
 // Frameless, transparent, always-on-top overlay that pops up on Alt+Space
 // and hides on blur / Escape — this is what makes it behave like Siri
 // instead of a static webpage.
+//
+// ⚠️ DEPRECATED: this root-level /Electron folder is an earlier prototype.
+// The app that actually ships now lives in /frontend/electron (main.cjs +
+// preload.cjs), driven by /frontend/package.json's "electron" script.
+// This file is kept only for reference — don't build from this folder.
+// It's also missing the auto-spawn of the Python backend (see spawnBackend
+// below, which is never called), so running it as-is requires the
+// backend to already be started manually.
 
 const {
   app,
@@ -101,7 +109,7 @@ function createWindow() {
     roundedCorners: true,
     backgroundMaterial: process.platform === 'win32' ? 'acrylic' : undefined,
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
+      preload: path.join(__dirname, 'Preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,

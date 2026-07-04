@@ -38,21 +38,25 @@ When the AI replies, the UI seamlessly scales downward to display a conversation
 
 ```
 TARS/
-├── Electron/
-│   ├── Main.js        ← Main process (Tray, Window resizing, SSE Parsing)
-│   ├── Preload.js     ← Context bridge API for secure IPC
-│   └── Package.json   ← Electron dependencies
 ├── frontend/
-│   ├── overlay.html   ← Lean HTML shell (semantic, ARIA, CSP header)
-│   ├── styles.css     ← Full design system (glassmorphism, animations)
-│   └── renderer.js    ← UI input, IPC bridge, Web Speech API integration
+│   ├── electron/
+│   │   ├── main.cjs    ← Main process (window, global shortcuts, tray)
+│   │   └── preload.cjs ← Context bridge API for secure IPC
+│   ├── src/
+│   │   ├── App.jsx     ← UI, talks to the backend directly via fetch/SSE
+│   │   └── Globe.jsx
+│   └── package.json    ← Vite + React + electron-builder config
 └── Backend/
-    ├── Main.py        ← FastAPI entry point
-    ├── api/           ← Routes (SSE stream, audio stubs)
-    └── services/      
-        ├── llm.py     ← AsyncOpenAI integration with Tool Calling engine
-        └── tools.py   ← OS execution layer (launch_app, set_volume)
+    ├── Main.py         ← FastAPI entry point
+    ├── api/            ← Routes (api/chat.py is the one actually mounted)
+    └── services/
+        ├── llm.py      ← AsyncOpenAI integration with Tool Calling engine
+        └── tools.py    ← OS execution layer (launch_app, set_volume)
 ```
+
+> **Note:** there's also a root-level `/Electron` folder from an earlier
+> prototype. It's kept for reference but isn't used to build the app —
+> everything above in `frontend/` is what actually runs.
 
 ---
 
@@ -60,21 +64,41 @@ TARS/
 
 ### 1. Backend
 Requires `python 3.10+` and `uvicorn`. Ensure you have an Ollama instance running.
+
 ```bash
 cd Backend
-pip install -r requirements.txt
-python Main.py
+python -m venv ../.venv          # first time only
+
+# Windows
+..\.venv\Scripts\pip install -r requirements.txt
+start_server.bat
+
+# macOS / Linux
+../.venv/bin/pip install -r requirements.txt
+./start_server.sh
 ```
 *(Runs on http://127.0.0.1:8000)*
 
+**macOS only — before first run:**
+- Install PortAudio (`sounddevice` needs it): `brew install portaudio`
+- The first time the backend accesses your mic (wake word / voice input), macOS
+  will prompt for **Microphone** access — grant it to your terminal/Python.
+- Reading the active window title uses `osascript`/System Events, which needs
+  **Accessibility** permission (System Settings → Privacy & Security →
+  Accessibility). Without it that feature degrades gracefully but silently.
+
 ### 2. Frontend (Electron)
-Requires `node` and `npm`.
+Requires `node` and `npm`. The app lives in `frontend/` (there's also a legacy
+`/Electron` folder at the repo root — ignore it, it's not used).
+
 ```bash
-cd Electron
+cd frontend
 npm install
-npm start
+npm run electron
 ```
 *(Runs in the system tray. Use `Alt + Space` to summon!)*
+
+For a production build: `npm run dist:win` or `npm run dist:mac`.
 
 ---
 
