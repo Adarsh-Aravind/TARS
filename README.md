@@ -101,6 +101,46 @@ For a production build: `npm run dist:win` or `npm run dist:mac`.
 
 ---
 
+## ✦ Shared Ollama (host PC ↔ friend's Mac)
+
+Everyone runs their **own** full TARS stack locally, so TARS controls *their*
+machine (apps, volume, voice on their mic). Only the **LLM inference** is shared
+— one person hosts Ollama, everyone else points their backend at it. This works
+identically whether you're on the same Wi-Fi or in different cities, thanks to
+[Tailscale](https://tailscale.com) (a zero-config private mesh VPN — each device
+gets a stable `100.x.y.z` IP, encrypted, no port-forwarding).
+
+**On the host (the PC running Ollama):**
+
+1. Install Tailscale on both machines and log into the same tailnet.
+2. Start Ollama bound to all interfaces so the tailnet can reach it (by default
+   it only listens on `127.0.0.1`):
+   ```powershell
+   # Windows (PowerShell) — set the service env var, then restart Ollama
+   setx OLLAMA_HOST "0.0.0.0:11434"
+   # then quit Ollama from the tray and relaunch it
+   ```
+   ```bash
+   # macOS / Linux
+   launchctl setenv OLLAMA_HOST "0.0.0.0:11434"   # macOS; or export before `ollama serve`
+   ```
+3. Find the host's Tailscale IP: `tailscale ip -4` (e.g. `100.101.102.103`).
+
+> ⚠️ Ollama has **no authentication**. Only expose it over Tailscale (or your
+> LAN) — never a public tunnel/port-forward, or anyone can drive your GPU.
+
+**On the friend's Mac** — copy `Backend/.env.example` to `Backend/.env` and set:
+
+```env
+OLLAMA_BASE_URL=http://100.101.102.103:11434   # the host's Tailscale IP
+```
+
+That's it — the Mac's backend now runs inference on the host's Ollama while
+everything else stays local. On the same LAN you can substitute the host's local
+IP (e.g. `192.168.1.20`) instead of the Tailscale one.
+
+---
+
 ## ✦ IPC Event Reference
 
 | Channel | Direction | Payload | Description |
