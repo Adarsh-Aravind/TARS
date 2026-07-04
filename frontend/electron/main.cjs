@@ -86,7 +86,11 @@ function createWindow() {
     skipTaskbar: true,         // live in the tray, not the taskbar
     alwaysOnTop: true,
     hasShadow: false,          // avoids shadow artifacts on transparent windows
-    backgroundMaterial: process.platform === 'win32' ? 'acrylic' : undefined,
+    // NOTE: do NOT set `backgroundMaterial: 'acrylic'` here. On Windows 11 it
+    // conflicts with `transparent: true` and DWM paints an opaque gray fill
+    // across the whole window instead of blurring the desktop. We keep the
+    // window fully transparent and get the frosted-glass look on the pill
+    // itself from the CSS `.glassmorphic-panel` (gradient + backdrop-filter).
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,  // required for contextBridge
