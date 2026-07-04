@@ -1,12 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Mic, Send, Wifi, WifiOff, X, ArrowLeft } from 'lucide-react';
+import { Mic, Send, Wifi, WifiOff, X } from 'lucide-react';
 
 export default function App() {
   const [uiState, setUiState] = useState('HIDDEN'); 
   const [status, setStatus] = useState('IDLE'); 
   const [isConnected, setIsConnected] = useState(false);
-  const [backendAddress, setBackendAddress] = useState('127.0.0.1:8000');
+  const [backendAddress] = useState('127.0.0.1:8000');
   const [inputText, setInputText] = useState('');
   const [replyText, setReplyText] = useState('');
   const [history, setHistory] = useState([]);
@@ -23,7 +23,7 @@ export default function App() {
   const stopAudio = () => {
      audioQueue.current = [];
      if (currentAudioSource.current) {
-         try { currentAudioSource.current.stop(); } catch(e){}
+         try { currentAudioSource.current.stop(); } catch {}
          currentAudioSource.current = null;
      }
      isPlaying.current = false;
@@ -111,6 +111,9 @@ export default function App() {
     eventSource.onopen = () => setIsConnected(true);
 
     return () => eventSource.close();
+    // Re-subscribe only when the backend address changes; listenViaBackend is
+    // stable enough for this mount-scoped subscription.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [backendAddress]);
 
   // Listen to Electron IPC Events
@@ -129,6 +132,8 @@ export default function App() {
         listenViaBackend();
       });
     }
+    // Register IPC listeners once on mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Scroll to bottom of replies
@@ -174,10 +179,11 @@ export default function App() {
       if (!response.body) throw new Error("No response body");
       const reader = response.body.getReader();
       const decoder = new TextDecoder("utf-8");
-      
+
       let sentenceBuffer = "";
       let fullBuffer = "";
-      
+      let lineBuffer = "";  // holds a partial SSE line split across network chunks
+
       while (true) {
         const { value, done } = await reader.read();
         if (done) {
@@ -187,10 +193,13 @@ export default function App() {
            }
            break;
         }
-        
-        const chunkStr = decoder.decode(value, { stream: true });
-        const lines = chunkStr.split('\n');
-        
+
+        lineBuffer += decoder.decode(value, { stream: true });
+        const lines = lineBuffer.split('\n');
+        // Keep the last (possibly incomplete) segment for the next read so we
+        // never JSON.parse a half-received line and silently drop its token.
+        lineBuffer = lines.pop();
+
         for (const line of lines) {
            if (line.startsWith('data: ')) {
                const dataStr = line.replace('data: ', '').trim();
@@ -219,7 +228,7 @@ export default function App() {
                      setStatus('ERROR');
                      setReplyText(prev => prev + "\n[ERROR]: " + data.detail);
                   }
-               } catch(e) {}
+               } catch {}
            }
         }
       }

@@ -13,7 +13,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onSummonVoice: (callback) => ipcRenderer.on('summon-voice', () => callback()),
 
   // Senders
-  dispatch: (query) => ipcRenderer.send('dispatch-query', query),
   hideOverlay: () => ipcRenderer.send('hide-overlay'),
   requestShow: () => ipcRenderer.send('request-show')
 });

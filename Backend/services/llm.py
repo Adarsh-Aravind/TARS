@@ -49,12 +49,15 @@ class LLMEngine:
                 base_url=settings.OLLAMA_BASE_URL + "/v1",
                 api_key="ollama",  # required by the SDK, ignored by Ollama
             )
-        else:
+        elif active_provider == "gemini":
+            # Gemini exposes an OpenAI-compatible endpoint; point the SDK at it
+            # explicitly, otherwise it would hit OpenAI's default base URL.
             self.client = AsyncOpenAI(
-                api_key=settings.OPENAI_API_KEY
-                if active_provider == "openai"
-                else settings.GEMINI_API_KEY
+                base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+                api_key=settings.GEMINI_API_KEY,
             )
+        else:  # openai
+            self.client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
 
         self.provider = active_provider
         self.model = settings.LLM_MODEL
@@ -81,7 +84,12 @@ class LLMEngine:
             session_id, [{"role": "system", "content": SYSTEM_PROMPT}]
         )
         history.append({"role": "user", "content": user_message})
-        return self._apply_rolling_window(history)
+        # Trim the *stored* history in place, not just the returned copy —
+        # otherwise the in-memory history grows unbounded for the lifetime of
+        # the process (one entry per turn, forever).
+        trimmed = self._apply_rolling_window(history)
+        self._session_history[session_id] = trimmed
+        return trimmed
 
     @classmethod
     async def stream_response(
@@ -138,7 +146,11 @@ class LLMEngine:
                         args = json.loads(tc["arguments"])
                     except json.JSONDecodeError:
                         args = {}
-                    
+
+                    # Structured tool-call event (consumed by the WebSocket
+                    # stream endpoint for persistence); ignored by SSE clients.
+                    yield json.dumps({"type": "tool_call", "name": name, "args": args})
+
                     yield json.dumps({"type": "token", "data": f"\n\n*(System: Executing {name}...)*\n"})
                     
                     result = await handle_tool_call(name, args)

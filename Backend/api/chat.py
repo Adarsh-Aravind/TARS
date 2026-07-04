@@ -1,32 +1,35 @@
+import io
+import wave
 import json
 import asyncio
-from fastapi import APIRouter, Request, HTTPException
-from fastapi.responses import StreamingResponse
+import logging
+
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse, Response
 from pydantic import BaseModel
-from typing import List, Dict, Any, Optional
+from typing import List
 
 from services.llm import LLMService
 from services.voice import voice_engine
+from db.database import save_message
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["chat"])
 
-@router.on_event("startup")
-async def startup_event():
-    # Start the background wake word listener
-    voice_engine.start()
+# Fixed session id for the desktop overlay's SSE stream. The rolling context
+# window lives server-side in LLMService keyed by this id.
+SSE_SESSION_ID = "default_sse_session"
 
-@router.on_event("shutdown")
-async def shutdown_event():
-    voice_engine.stop()
 
 class ChatMessage(BaseModel):
     role: str
     content: str
 
+
 class ChatRequest(BaseModel):
     messages: List[ChatMessage]
 
-llm_service = LLMService()
 
 @router.post("/chat/stream")
 async def chat_stream(request: ChatRequest):
@@ -36,7 +39,7 @@ async def chat_stream(request: ChatRequest):
     if not request.messages:
         raise HTTPException(status_code=400, detail="Messages list cannot be empty.")
 
-    # Extract the latest user message for the new LLMEngine
+    # Extract the latest user message for the LLM engine.
     user_message = ""
     for msg in reversed(request.messages):
         if msg.role == "user":
@@ -47,39 +50,43 @@ async def chat_stream(request: ChatRequest):
         raise HTTPException(status_code=400, detail="No user message found.")
 
     async def sse_generator():
+        # Persist the user turn up front so history survives a crash mid-stream.
         try:
-            async for chunk_str in LLMService.stream_response("default_sse_session", user_message):
+            await save_message(SSE_SESSION_ID, "user", user_message)
+        except Exception as e:
+            logger.error(f"Failed to persist user message: {e}")
+
+        assistant_reply = ""
+        cancelled = False
+        try:
+            async for chunk_str in LLMService.stream_response(SSE_SESSION_ID, user_message):
                 chunk = json.loads(chunk_str)
                 if chunk.get("type") == "token":
+                    assistant_reply += chunk["data"]
                     # Format as Server-Sent Events (SSE)
                     yield f"data: {json.dumps({'chunk': chunk['data']})}\n\n"
                 elif chunk.get("type") == "error":
                     yield f"event: error\ndata: {json.dumps({'detail': chunk['data']})}\n\n"
+
+            # Normal completion: persist the assistant turn.
+            if assistant_reply:
+                try:
+                    await save_message(SSE_SESSION_ID, "assistant", assistant_reply)
+                except Exception as e:
+                    logger.error(f"Failed to persist assistant message: {e}")
         except asyncio.CancelledError:
             # Client disconnected abruptly. Silence the error and exit cleanly.
-            pass
+            cancelled = True
         except Exception as e:
             # Secure server-side logging
-            import logging
-            logging.error(f"LLM Stream Error: {e}", exc_info=True)
-            # Send an error event if something fails during streaming
+            logger.error(f"LLM Stream Error: {e}", exc_info=True)
             yield f"event: error\ndata: {json.dumps({'detail': 'An internal LLM connection error occurred.'})}\n\n"
         finally:
-            if not asyncio.current_task().cancelled():
-                # Send a done event
+            if not cancelled:
                 yield "event: done\ndata: {}\n\n"
 
     return StreamingResponse(sse_generator(), media_type="text/event-stream")
 
-@router.post("/audio/transcribe")
-async def transcribe_audio():
-    """
-    Stub for audio transcription (e.g., local Faster-Whisper).
-    """
-    return {"status": "stub", "message": "Transcription endpoint not fully implemented yet."}
-
-import edge_tts
-import speech_recognition as sr
 
 @router.get("/events")
 async def sse_events():
@@ -94,38 +101,43 @@ async def sse_events():
             await asyncio.sleep(0.5)
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
+
 @router.get("/audio/listen")
 async def listen_for_command():
     """
-    Called by frontend when woken up. Records for a few seconds and transcribes.
+    Called by the frontend when woken up. Records for a few seconds and
+    transcribes locally with Whisper.
     """
     voice_engine.stop()
     text = ""
     try:
         import sounddevice as sd
-        import speech_recognition as sr
-        
-        recognizer = sr.Recognizer()
+        from services.transcription import TranscriptionService
+
         samplerate = 16000
         duration = 5.0
-        
-        print("[TARS] Listening for command...", flush=True)
-        audio_data = sd.rec(int(samplerate * duration), samplerate=samplerate, channels=1, dtype='int16')
+
+        logger.info("[TARS] Listening for command...")
+        audio_data = sd.rec(int(samplerate * duration), samplerate=samplerate, channels=1, dtype="int16")
         sd.wait()
-        
-        raw_audio = audio_data.tobytes()
-        audio = sr.AudioData(raw_audio, samplerate, 2)
-        text = recognizer.recognize_google(audio)
-        print(f"[TARS] Heard: {text}", flush=True)
+
+        # Wrap the raw PCM in a WAV container for Whisper.
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(samplerate)
+            wf.writeframes(audio_data.tobytes())
+
+        text = await TranscriptionService.transcribe_audio(buf.getvalue())
+        logger.info(f"[TARS] Heard: {text}")
     except Exception as e:
-        import logging
-        logging.error(f"Error during command listening: {e}")
+        logger.error(f"Error during command listening: {e}")
     finally:
         voice_engine.start()
-        
+
     return {"text": text}
 
-from fastapi.responses import Response
 
 @router.get("/audio/tars-tts")
 async def tars_tts(text: str):
@@ -137,6 +149,5 @@ async def tars_tts(text: str):
         wav_bytes = generate_tars_speech(text)
         return Response(content=wav_bytes, media_type="audio/wav")
     except Exception as e:
-        import logging
-        logging.error(f"Error generating TARS TTS: {e}", exc_info=True)
+        logger.error(f"Error generating TARS TTS: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))

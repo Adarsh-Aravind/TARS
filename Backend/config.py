@@ -11,8 +11,7 @@ class Settings(BaseSettings):
     # API Keys for Cloud Fallback
     OPENAI_API_KEY: Optional[str] = None
     GEMINI_API_KEY: Optional[str] = None
-    ELEVENLABS_API_KEY: Optional[str] = None
-    
+
     MAX_TOKENS: int = 1024
     RATE_LIMIT_RPM: int = 60
     SQLITE_PATH: str = "./tars.db"

@@ -29,7 +29,7 @@ When the AI replies, the UI seamlessly scales downward to display a conversation
 - **Dynamic UI Resizing**: The Electron shell automatically resizes to expand and collapse the reply box based on interaction state.
 - **Tool Execution**: The LLM securely interfaces with your operating system. You can ask it to "Open File Explorer" or "Launch YouTube", and it will autonomously trigger the tool locally and summarize its actions!
 - **System Tray Integration**: Quietly runs in your system tray without cluttering the taskbar.
-- **Voice Input**: Integrated Speech-to-Text via the Web Speech API *(Note: requires Google API keys for Electron on Windows, or a local Whisper endpoint)*.
+- **Voice Input & Wake Word**: Fully **local** Speech-to-Text via faster-whisper — nothing is sent to the cloud. Say "TARS" to wake it, or use the mic button.
 - **Glassmorphism 2.0**: Native Window 11 Acrylic and macOS HUD Vibrancy.
 
 ---
@@ -43,20 +43,16 @@ TARS/
 │   │   ├── main.cjs    ← Main process (window, global shortcuts, tray)
 │   │   └── preload.cjs ← Context bridge API for secure IPC
 │   ├── src/
-│   │   ├── App.jsx     ← UI, talks to the backend directly via fetch/SSE
-│   │   └── Globe.jsx
+│   │   └── App.jsx     ← UI, talks to the backend directly via fetch/SSE
 │   └── package.json    ← Vite + React + electron-builder config
 └── Backend/
-    ├── Main.py         ← FastAPI entry point
-    ├── api/            ← Routes (api/chat.py is the one actually mounted)
+    ├── Main.py         ← FastAPI entry point (mounts chat_router + api_router)
+    ├── api/            ← Routes (chat.py = live SSE/audio; router.py = v1 REST/WS)
     └── services/
         ├── llm.py      ← AsyncOpenAI integration with Tool Calling engine
-        └── tools.py    ← OS execution layer (launch_app, set_volume)
+        ├── voice.py    ← Local Whisper wake-word listener
+        └── tools.py    ← OS execution layer (launch_app, set_volume, run_system_command)
 ```
-
-> **Note:** there's also a root-level `/Electron` folder from an earlier
-> prototype. It's kept for reference but isn't used to build the app —
-> everything above in `frontend/` is what actually runs.
 
 ---
 
@@ -77,7 +73,7 @@ start_server.bat
 ../.venv/bin/pip install -r requirements.txt
 ./start_server.sh
 ```
-*(Runs on http://127.0.0.1:8000)*
+*(Runs on http://127.0.0.1:8000 — bound to loopback only, since the assistant can execute local shell commands)*
 
 **macOS only — before first run:**
 - Install PortAudio (`sounddevice` needs it): `brew install portaudio`
@@ -88,14 +84,17 @@ start_server.bat
   Accessibility). Without it that feature degrades gracefully but silently.
 
 ### 2. Frontend (Electron)
-Requires `node` and `npm`. The app lives in `frontend/` (there's also a legacy
-`/Electron` folder at the repo root — ignore it, it's not used).
+Requires `node` and `npm`. The app lives entirely in `frontend/`.
 
 ```bash
 cd frontend
 npm install
 npm run electron
 ```
+
+On Windows/Linux the Electron app also tries to auto-spawn the Python backend
+from the repo `.venv` (falling back to `python` on PATH); if that fails, just
+start the backend manually as above.
 *(Runs in the system tray. Use `Alt + Space` to summon!)*
 
 For a production build: `npm run dist:win` or `npm run dist:mac`.
