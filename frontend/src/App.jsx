@@ -14,6 +14,8 @@ export default function App() {
 
   const inputRef = useRef(null);
   const replyEndRef = useRef(null);
+  const uiStateRef = useRef(uiState);  // latest uiState for async callbacks
+  uiStateRef.current = uiState;
   
   const audioQueue = useRef([]);
   const isPlaying = useRef(false);
@@ -72,6 +74,49 @@ export default function App() {
     playNextAudio();
   };
 
+  // Speak a single line and resolve only once it has finished playing. Used for
+  // the wake-word greeting so we can hold off on recording the command until
+  // TARS has stopped talking (otherwise the greeting bleeds into the mic).
+  const playClipAndWait = (text) =>
+    new Promise((resolve) => {
+      (async () => {
+        const cleanText = (text || '').trim();
+        if (!cleanText) return resolve();
+        try {
+          if (!audioContext.current) {
+            audioContext.current = new (window.AudioContext || window.webkitAudioContext)();
+          }
+          const response = await fetch(
+            `http://${backendAddress}/api/v1/audio/tars-tts?text=${encodeURIComponent(cleanText)}`
+          );
+          const arrayBuffer = await response.arrayBuffer();
+          const audioBuffer = await audioContext.current.decodeAudioData(arrayBuffer);
+          const source = audioContext.current.createBufferSource();
+          source.buffer = audioBuffer;
+          source.connect(audioContext.current.destination);
+          currentAudioSource.current = source;
+          source.onended = () => {
+            currentAudioSource.current = null;
+            resolve();
+          };
+          source.start(0);
+        } catch (e) {
+          console.error('Greeting play error', e);
+          resolve();
+        }
+      })();
+    });
+
+  // A few TARS-flavored acknowledgements, à la Google Assistant's chime.
+  const WAKE_GREETINGS = [
+    "Yeah?",
+    "I'm listening.",
+    "Go ahead.",
+    "TARS online. What do you need?",
+    "At your service.",
+    "Ready when you are.",
+  ];
+
   const listenViaBackend = async () => {
     setStatus('LISTENING');
     try {
@@ -97,18 +142,23 @@ export default function App() {
   useEffect(() => {
     const eventSource = new EventSource(`http://${backendAddress}/api/v1/events`);
     
-    eventSource.addEventListener('wakeup', () => {
+    eventSource.addEventListener('wakeup', async () => {
       console.log('WAKEUP EVENT RECEIVED');
       // Tell electron to unhide the window
       if (window.electronAPI) window.electronAPI.requestShow();
-      
+
       // Stop current speech
       stopAudio();
-      
+
       setUiState('VOICE_LISTENING');
-      
-      // Start listening via backend
-      listenViaBackend();
+
+      // Greet first (like an assistant acknowledging you), then listen. We wait
+      // for the greeting to finish so it doesn't get recorded as the command.
+      const greeting = WAKE_GREETINGS[Math.floor(Math.random() * WAKE_GREETINGS.length)];
+      await playClipAndWait(greeting);
+
+      // The user may have dismissed the overlay while TARS was greeting.
+      if (uiStateRef.current === 'VOICE_LISTENING') listenViaBackend();
     });
 
     eventSource.onerror = () => setIsConnected(false);

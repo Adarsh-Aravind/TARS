@@ -5,9 +5,17 @@ from pedalboard import Pedalboard, Reverb, HighpassFilter, LowpassFilter, PitchS
 from kokoro_onnx import Kokoro
 import numpy as np
 
-# Load model (assume they are in the Backend directory)
+# Load model (assume they are in the Backend directory).
+# kokoro-onnx >= 0.4 ships the voice pack as a NumPy .bin ("voices.bin"), NOT
+# the legacy 30 MB voices.json — loading the JSON with the installed 0.5.x
+# raises "Failed to interpret file as a pickle" and 500s every TTS request.
+# The .bin lives at the repo root (one level above Backend).
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "kokoro-v0_19.onnx")
-VOICES_PATH = os.path.join(os.path.dirname(__file__), "..", "voices.json")
+VOICES_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "voices.bin")
+
+# TARS is a male voice; af_heart doesn't exist in the v0.19 pack. am_adam +
+# the pitch/EQ effects below gets us the closest to the film's flat delivery.
+DEFAULT_VOICE = "am_adam"
 
 kokoro_model = None
 
@@ -44,7 +52,7 @@ def apply_tars_effects(audio_data: np.ndarray, sample_rate: int) -> np.ndarray:
     effected = board(audio_data, sample_rate)
     return effected[0] # return 1D array
 
-def generate_tars_speech(text: str, voice="af_heart", speed=0.90) -> bytes:
+def generate_tars_speech(text: str, voice=DEFAULT_VOICE, speed=0.90) -> bytes:
     """
     Generates TARS speech for a given text and returns WAV file bytes.
     """
@@ -67,9 +75,9 @@ def play_greeting():
     
     greetings = ["TARS online.", "Awaiting instructions.", "Yes?", "TARS here."]
     greeting = random.choice(greetings)
-    
+
     k = get_kokoro()
-    audio_array, sample_rate = k.create(greeting, voice="af_heart", speed=0.90)
+    audio_array, sample_rate = k.create(greeting, voice=DEFAULT_VOICE, speed=0.90)
     processed_audio = apply_tars_effects(audio_array, sample_rate)
     
     sd.play(processed_audio, sample_rate)
