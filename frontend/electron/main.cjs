@@ -87,6 +87,7 @@ function setVoiceMode(active) {
     // use workArea so we clear the top of the screen cleanly.
     const y = IS_MAC ? display.bounds.y : Math.round(display.workArea.y);
     win.setPosition(x, y);
+    if (!win.isVisible()) win.show();
   } else {
     positionWindow();
   }

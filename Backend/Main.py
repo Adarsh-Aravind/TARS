@@ -9,7 +9,6 @@ from config import settings
 from db.database import init_db
 from middleware.error_handler import global_exception_handler
 from middleware.rate_limiter import rate_limiter_middleware
-from services.voice import voice_engine
 
 # Routers
 from api.chat import router as chat_router
@@ -20,14 +19,10 @@ logging.basicConfig(level=logging.INFO)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: initialize the SQLite database and start the wake-word listener.
-    # (Startup lives here rather than on the router, since router on_event
-    # handlers are deprecated and don't fire reliably.)
+    # Startup: initialize the SQLite database.
     await init_db()
-    voice_engine.start()
     yield
     # Shutdown
-    voice_engine.stop()
 
 
 app = FastAPI(

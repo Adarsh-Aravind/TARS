@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Mic, Send, Wifi, WifiOff, X } from 'lucide-react';
+import Globe from './Globe';
 
 export default function App() {
-  const [uiState, setUiState] = useState('HIDDEN'); 
+  const [uiState, setUiState] = useState('IDLE'); 
   const [status, setStatus] = useState('IDLE'); 
   const [isConnected, setIsConnected] = useState(false);
   const [backendAddress] = useState('127.0.0.1:8000');
@@ -21,13 +22,19 @@ export default function App() {
   const isPlaying = useRef(false);
   const audioContext = useRef(null);
   const currentAudioSource = useRef(null);
+  const audioGeneration = useRef(0); // bumped by stopAudio() to invalidate in-flight fetches
 
   // macOS renders the listening island as a solid-black notch-blended bar;
   // every other platform gets a floating frosted-glass pill.
   const isMac = typeof window !== 'undefined' && window.electronAPI?.platform === 'darwin';
 
+  const readyAudioBuffers = useRef([]);
+  const isFetching = useRef(false);
+
   const stopAudio = () => {
      audioQueue.current = [];
+     readyAudioBuffers.current = [];
+     audioGeneration.current += 1; // any in-flight playNextAudio() call becomes stale
      if (currentAudioSource.current) {
          try { currentAudioSource.current.stop(); } catch {}
          currentAudioSource.current = null;
@@ -35,43 +42,69 @@ export default function App() {
      isPlaying.current = false;
   };
 
-  const playNextAudio = async () => {
-    if (isPlaying.current || audioQueue.current.length === 0) return;
+  const processAudioQueue = async () => {
+     if (isFetching.current || audioQueue.current.length === 0) return;
+     isFetching.current = true;
+     
+     if (!audioContext.current) {
+         audioContext.current = new (window.AudioContext || window.webkitAudioContext)();
+     }
+     
+     while (audioQueue.current.length > 0) {
+         const text = audioQueue.current.shift();
+         const genId = audioGeneration.current;
+         try {
+             const response = await fetch(`http://${backendAddress}/api/v1/audio/tars-tts?text=${encodeURIComponent(text)}`);
+             if (audioGeneration.current !== genId) continue;
+             const arrayBuffer = await response.arrayBuffer();
+             if (audioGeneration.current !== genId) continue;
+             const audioBuffer = await audioContext.current.decodeAudioData(arrayBuffer);
+             if (audioGeneration.current !== genId) continue;
+             
+             readyAudioBuffers.current.push(audioBuffer);
+             
+             if (!isPlaying.current) playNextAudio();
+         } catch (e) {
+             console.error("Audio fetch error", e);
+         }
+     }
+     isFetching.current = false;
+  };
+
+  const playNextAudio = () => {
+    if (isPlaying.current || readyAudioBuffers.current.length === 0) return;
     isPlaying.current = true;
     
     if (!audioContext.current) {
         audioContext.current = new (window.AudioContext || window.webkitAudioContext)();
     }
     
-    const text = audioQueue.current.shift();
-    try {
-        const response = await fetch(`http://${backendAddress}/api/v1/audio/tars-tts?text=${encodeURIComponent(text)}`);
-        const arrayBuffer = await response.arrayBuffer();
-        const audioBuffer = await audioContext.current.decodeAudioData(arrayBuffer);
-        
-        const source = audioContext.current.createBufferSource();
-        source.buffer = audioBuffer;
-        source.connect(audioContext.current.destination);
-        currentAudioSource.current = source;
-        source.onended = () => {
-            currentAudioSource.current = null;
-            isPlaying.current = false;
-            playNextAudio();
-        };
-        source.start(0);
-    } catch (e) {
-        console.error("Audio play error", e);
+    const audioBuffer = readyAudioBuffers.current.shift();
+    const source = audioContext.current.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(audioContext.current.destination);
+    currentAudioSource.current = source;
+    
+    source.onended = () => {
         currentAudioSource.current = null;
         isPlaying.current = false;
         playNextAudio();
-    }
+    };
+    source.start(0);
   };
 
   const speakText = (text) => {
-    const cleanText = text.replace(/<display>[\s\S]*?<\/display>/g, '').trim();
+    // Strip <display> tags, markdown, and [...] brackets completely to avoid speaking scaffolding
+    const cleanText = text
+      .replace(/<display>[\s\S]*?<\/display>/gi, '')
+      .replace(/\[.*?\]/g, '')
+      .replace(/<[^>]+>/g, '')
+      .replace(/[*_~`#]/g, '')
+      .trim();
+      
     if (!cleanText) return;
     audioQueue.current.push(cleanText);
-    playNextAudio();
+    processAudioQueue();
   };
 
   // Speak a single line and resolve only once it has finished playing. Used for
@@ -117,57 +150,137 @@ export default function App() {
     "Ready when you are.",
   ];
 
-  const listenViaBackend = async () => {
-    setStatus('LISTENING');
-    try {
-      const res = await fetch(`http://${backendAddress}/api/v1/audio/listen`);
-      const data = await res.json();
-      setStatus('IDLE');
-      if (data.text && data.text.trim()) {
-        setInputText(data.text);
-        dispatchQuery(data.text);
-      } else {
-        // If we were in voice mode and they said nothing, hide
-        setUiState(prev => prev === 'VOICE_LISTENING' ? 'HIDDEN' : prev);
+  const recognitionRef = useRef(null);
+  const isListeningRef = useRef(false);
+
+  useEffect(() => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      console.warn("Speech Recognition not supported in this browser.");
+      return;
+    }
+    
+    const recognition = new SpeechRecognition();
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = 'en-US';
+    recognitionRef.current = recognition;
+
+    recognition.onresult = async (event) => {
+      let finalTranscript = '';
+      let interimTranscript = '';
+      for (let i = event.resultIndex; i < event.results.length; ++i) {
+        if (event.results[i].isFinal) {
+          finalTranscript += event.results[i][0].transcript;
+        } else {
+          interimTranscript += event.results[i][0].transcript;
+        }
       }
-    } catch (e) {
-      console.error('Audio listen error:', e);
+
+      const text = (finalTranscript || interimTranscript).toLowerCase().trim();
+      
+      // Check for wake word if we are in IDLE
+      if (uiStateRef.current === 'IDLE' && /\b(tars|tar|tarz|taz|tarss|tares|tarce|tarts)\b/.test(text)) {
+         recognition.stop();
+         
+         if (window.electronAPI) window.electronAPI.requestShow();
+         stopAudio();
+         setUiState('VOICE_LISTENING');
+         
+         const greeting = WAKE_GREETINGS[Math.floor(Math.random() * WAKE_GREETINGS.length)];
+         await playClipAndWait(greeting);
+         
+         if (uiStateRef.current === 'VOICE_LISTENING') {
+            listenViaBackend();
+         }
+      }
+    };
+
+    recognition.onend = () => {
+      // Auto-restart if we're in IDLE and it stopped unexpectedly
+      if (uiStateRef.current === 'IDLE' && isListeningRef.current) {
+        try { recognition.start(); } catch (e) {}
+      }
+    };
+
+    if (uiState === 'IDLE') {
+       isListeningRef.current = true;
+       try { recognition.start(); } catch (e) {}
+    } else {
+       isListeningRef.current = false;
+       try { recognition.stop(); } catch (e) {}
+    }
+
+    return () => {
+      isListeningRef.current = false;
+      try { recognition.stop(); } catch (e) {}
+    }
+  }, [uiState]);
+
+  const listenViaBackend = () => {
+    setStatus('LISTENING');
+    stopAudio();
+    
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      setStatus('IDLE');
+      setUiState(prev => prev === 'VOICE_LISTENING' ? 'IDLE' : prev);
+      return;
+    }
+    
+    const recognition = new SpeechRecognition();
+    recognition.continuous = false;
+    recognition.interimResults = false;
+    recognition.lang = 'en-US';
+    
+    let hasResult = false;
+    
+    recognition.onresult = (event) => {
+      hasResult = true;
+      const text = event.results[0][0].transcript;
+      setStatus('IDLE');
+      if (text && text.trim()) {
+        setInputText(text);
+        dispatchQuery(text);
+      } else {
+        setUiState(prev => prev === 'VOICE_LISTENING' ? 'IDLE' : prev);
+      }
+    };
+    
+    recognition.onerror = (e) => {
+       console.error("Speech recognition error:", e);
+       setStatus('ERROR');
+       setTimeout(() => setStatus('IDLE'), 2000);
+       setUiState(prev => prev === 'VOICE_LISTENING' ? 'IDLE' : prev);
+    };
+    
+    recognition.onend = () => {
+       if (!hasResult) {
+          setStatus('IDLE');
+          setUiState(prev => prev === 'VOICE_LISTENING' ? 'IDLE' : prev);
+       }
+    };
+    
+    try {
+      recognition.start();
+    } catch(e) {
+      console.error(e);
       setStatus('ERROR');
-      setTimeout(() => setStatus('IDLE'), 2000);
-      setUiState(prev => prev === 'VOICE_LISTENING' ? 'HIDDEN' : prev);
+      setUiState(prev => prev === 'VOICE_LISTENING' ? 'IDLE' : prev);
     }
   };
 
-  // Background Wake Word Event Listener
+  // Poll connection status
   useEffect(() => {
-    const eventSource = new EventSource(`http://${backendAddress}/api/v1/events`);
-    
-    eventSource.addEventListener('wakeup', async () => {
-      console.log('WAKEUP EVENT RECEIVED');
-      // Tell electron to unhide the window
-      if (window.electronAPI) window.electronAPI.requestShow();
-
-      // Stop current speech
-      stopAudio();
-
-      setUiState('VOICE_LISTENING');
-
-      // Greet first (like an assistant acknowledging you), then listen. We wait
-      // for the greeting to finish so it doesn't get recorded as the command.
-      const greeting = WAKE_GREETINGS[Math.floor(Math.random() * WAKE_GREETINGS.length)];
-      await playClipAndWait(greeting);
-
-      // The user may have dismissed the overlay while TARS was greeting.
-      if (uiStateRef.current === 'VOICE_LISTENING') listenViaBackend();
-    });
-
-    eventSource.onerror = () => setIsConnected(false);
-    eventSource.onopen = () => setIsConnected(true);
-
-    return () => eventSource.close();
-    // Re-subscribe only when the backend address changes; listenViaBackend is
-    // stable enough for this mount-scoped subscription.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    const interval = setInterval(async () => {
+       try {
+         await fetch(`http://${backendAddress}/docs`);
+         setIsConnected(true);
+       } catch {
+         setIsConnected(false);
+       }
+    }, 5000);
+    return () => clearInterval(interval);
   }, [backendAddress]);
 
   // Listen to Electron IPC Events
@@ -199,7 +312,7 @@ export default function App() {
 
   // If hidden, notify main process to hide window
   useEffect(() => {
-    if (uiState === 'HIDDEN' && window.electronAPI) {
+    if (uiState === 'IDLE' && window.electronAPI) {
       window.electronAPI.hideOverlay();
       stopAudio();
       setInputText('');
@@ -208,9 +321,9 @@ export default function App() {
   }, [uiState]);
 
   // Drive the main-process "voice mode": slide the window to the top-center of
-  // the screen (notch on macOS) and pin it open while we're listening.
+  // the screen (notch on macOS) and pin it open while we're listening or idle.
   useEffect(() => {
-    window.electronAPI?.setVoiceMode?.(uiState === 'VOICE_LISTENING');
+    window.electronAPI?.setVoiceMode?.(uiState === 'VOICE_LISTENING' || uiState === 'IDLE');
   }, [uiState]);
 
   // Dispatch query to backend
@@ -279,8 +392,13 @@ export default function App() {
                      // Buffer speech chunks
                      sentenceBuffer += data.chunk;
                      
-                     // Speak on punctuation boundaries for natural flow
-                     if (/[.!?]\s/.test(sentenceBuffer) || sentenceBuffer.length > 120) {
+                     // Speak on punctuation boundaries for natural flow. Keep trailing punctuation!
+                     const match = sentenceBuffer.match(/([\s\S]*?[.!?])(?:\s+|$)([\s\S]*)/);
+                     if (match) {
+                         speakText(match[1].trim());
+                         sentenceBuffer = match[2];
+                     } else if (sentenceBuffer.length > 200) {
+                         // Emergency split if too long without punctuation
                          speakText(sentenceBuffer.trim());
                          sentenceBuffer = "";
                      }
@@ -302,6 +420,7 @@ export default function App() {
     if (status === 'LISTENING') {
        // Backend doesn't support manual abort yet, so we just wait
     } else {
+       stopAudio(); // Stop TARS's own playback first so it doesn't bleed into the mic
        listenViaBackend();
     }
   };
@@ -314,7 +433,7 @@ export default function App() {
 
   const handleKeyDown = (e) => {
     if (e.key === 'Escape') {
-      setUiState('HIDDEN');
+      setUiState('IDLE');
     } else if (e.key === 'ArrowUp' && (uiState === 'TEXT_INPUT' || uiState === 'EXPANDED_CHAT')) {
       if (history.length > 0 && historyIndex < history.length - 1) {
         const nextIndex = historyIndex + 1;
@@ -335,7 +454,7 @@ export default function App() {
 
   const handleClose = (e) => {
     e.stopPropagation();
-    setUiState('HIDDEN');
+    setUiState('IDLE');
   };
 
   const getStatusLabel = () => {
@@ -348,7 +467,7 @@ export default function App() {
     }
   };
 
-  if (uiState === 'HIDDEN') return null;
+  if (uiState === 'IDLE') return null;
 
   return (
     <div
@@ -566,6 +685,10 @@ export default function App() {
             </motion.div>
           )}
         </AnimatePresence>
+        
+        {(uiState === 'VOICE_LISTENING' || uiState === 'IDLE' || uiState === 'EXPANDED_CHAT') && (
+           <Globe isListening={status === 'LISTENING'} isProcessing={status === 'RUNNING'} />
+        )}
       </motion.div>
     </div>
   );

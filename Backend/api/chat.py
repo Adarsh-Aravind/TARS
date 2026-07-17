@@ -8,7 +8,6 @@ from pydantic import BaseModel
 from typing import List
 
 from services.llm import LLMService
-from services.voice import voice_engine
 from db.database import save_message
 
 logger = logging.getLogger(__name__)
@@ -86,53 +85,7 @@ async def chat_stream(request: ChatRequest):
     return StreamingResponse(sse_generator(), media_type="text/event-stream")
 
 
-@router.get("/events")
-async def sse_events():
-    """
-    Streams system events to the frontend (e.g. wakeup).
-    """
-    async def event_stream():
-        while True:
-            if voice_engine.wakeup_event.is_set():
-                voice_engine.wakeup_event.clear()
-                yield "event: wakeup\ndata: {}\n\n"
-            await asyncio.sleep(0.5)
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
-
-def _capture_and_transcribe(duration: float, samplerate: int) -> str:
-    """
-    Blocking: capture one clip through the VoiceEngine's mic lock and run it
-    through local Whisper. Kept sync so it can be offloaded with to_thread and
-    never stall the async event loop (and the SSE /events poll) for 5s.
-    """
-    from services.transcription import transcribe_sync
-
-    mono = voice_engine.record(duration, samplerate)
-    wav_bytes = voice_engine._to_wav(mono, samplerate)
-    return transcribe_sync(wav_bytes)
-
-
-@router.get("/audio/listen")
-async def listen_for_command():
-    """
-    Called by the frontend when woken up. Records for a few seconds and
-    transcribes locally with Whisper.
-    """
-    # Fully stop (and join) the wake-word loop first so the mic is released
-    # before we open our own capture stream.
-    voice_engine.stop()
-    text = ""
-    try:
-        logger.info("[TARS] Listening for command...")
-        text = await asyncio.to_thread(_capture_and_transcribe, 5.0, 16000)
-        logger.info(f"[TARS] Heard: {text}")
-    except Exception as e:
-        logger.error(f"Error during command listening: {e}")
-    finally:
-        voice_engine.start()
-
-    return {"text": text}
 
 
 @router.get("/audio/tars-tts")
