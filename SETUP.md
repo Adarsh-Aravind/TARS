@@ -79,14 +79,48 @@ OLLAMA_BASE_URL=http://localhost:11434
 
 ## 4. Using it
 
-| Shortcut | Action |
+| Trigger | Action |
 |---|---|
-| `Alt+Space` | Summon overlay (text) |
-| `Shift+Alt+Space` | Summon overlay (voice) |
+| **"Hey TARS"** | Wake by voice — no hands, no shortcut |
+| `Alt+Space` | Command bar (type) |
+| `Shift+Alt+Space` | Voice input directly |
 | `Esc` | Dismiss — or **deny** a pending confirmation |
 
 TARS lives in the system tray / menu bar. Closing the window hides it; quit from
 the tray menu.
+
+### The two ways in
+
+**Typing (`Alt+Space`).** A single command bar appears. Ask something and the
+same bar grows downward into the reply — one continuous object, never a swap.
+Activity chips show each tool as it runs. `↑`/`↓` walk your history.
+
+**Voice ("Hey TARS").** A slim island appears at the top-center of the screen
+and TARS answers out loud. It has three visual states:
+
+| State | Reads |
+|---|---|
+| Listening | white bars driven by **your live microphone** |
+| Thinking | amber, orbiting halo while the agent works |
+| Speaking | blue bars driven by **the actual audio being played** |
+
+The bars are wired to real `AnalyserNode` data, not a looping animation — they
+go flat when you stop talking, which is how you can tell it is genuinely
+hearing you. A live caption under the island echoes what it heard and what it
+is saying.
+
+Say **"Hey TARS, open YouTube"** in one breath and it skips the greeting and
+acts immediately. Say just **"Hey TARS"** and it answers, then listens.
+
+The wake phrase requires a greeting prefix ("hey", "ok", "hi", "yo") in front of
+a TARS-like word. That is deliberate: matching bare "tars" fired constantly on
+ordinary speech containing "start", "cars", or "stars". Common mishearings
+("tarts", "czars", "stars") are all accepted after a prefix.
+
+> Wake-word detection uses the browser Speech API, which in Chromium sends audio
+> to Google's servers for transcription and needs a network connection. If you
+> want a fully offline wake word, that requires a local model such as Porcupine
+> or openWakeWord.
 
 ### Making it feel built in
 1. **Start at login** — tray menu → *Start at login*. TARS boots hidden into the
@@ -187,6 +221,9 @@ turns. It does not survive a backend restart. `POST /api/v1/reset` clears it.
 | Confirmation says "unknown or expired" | Backend reloaded or multi-worker — see §7 |
 | Overlay shows "Offline" | Backend not up; run `tars.bat --backend` and read the traceback |
 | `Alt+Space` does nothing | Another app owns the shortcut |
+| "Hey TARS" never wakes it | Mic permission denied, or no network (the Speech API needs one). Check the console for a TARS warning. |
+| It wakes at random | Report the phrase — the matcher lives in `frontend/src/lib/speech.js` and is unit-testable |
+| Listening bars stay flat | Mic blocked for level metering; recognition may still work. Grant microphone access. |
 | Volume fails on Windows | `pip install pycaw comtypes` |
 | `browser_*` unavailable | `playwright install chromium` |
 | Media keys do nothing (macOS) | Grant Accessibility + Automation; browser-tab audio isn't controllable this way |

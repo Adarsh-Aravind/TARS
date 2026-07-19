@@ -1,370 +1,261 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Mic, Send, WifiOff, X } from 'lucide-react';
-import Globe from './Globe';
+
+import VoiceIsland from './components/VoiceIsland';
+import CommandPanel from './components/CommandPanel';
+import { toolLabel } from './lib/toolLabels';
+import { AudioEngine } from './lib/audioEngine';
+import { MicLevel } from './lib/micLevel';
+import { WakeListener, captureCommand, isSpeechSupported } from './lib/speech';
+
+const BACKEND = '127.0.0.1:8000';
+
+/**
+ * UI modes.
+ *
+ *   HIDDEN    nothing on screen; wake listener armed
+ *   TEXT      compact command bar (Alt+Space)
+ *   CHAT      the bar, grown to hold a reply
+ *   VOICE     top-center island: listening / thinking / speaking
+ */
+const MODE = { HIDDEN: 'HIDDEN', TEXT: 'TEXT', CHAT: 'CHAT', VOICE: 'VOICE' };
+
+const WAKE_GREETINGS = [
+  "Yeah?",
+  "I'm listening.",
+  "Go ahead.",
+  "At your service.",
+  "Ready when you are.",
+  "What do you need?",
+];
+
+const SPRING = { type: 'spring', stiffness: 420, damping: 38, mass: 0.9 };
+
+// Outside Electron there is no Alt+Space to summon the overlay, so starting
+// hidden would render a permanently blank page. Opening straight into the
+// command bar makes `npm run dev` in a plain browser a usable way to work on
+// the UI.
+const IN_ELECTRON = typeof window !== 'undefined' && Boolean(window.electronAPI);
 
 export default function App() {
-  const [uiState, setUiState] = useState('IDLE');
-  const [status, setStatus] = useState('IDLE'); 
+  const [mode, setMode] = useState(IN_ELECTRON ? MODE.HIDDEN : MODE.TEXT);
+  const [voicePhase, setVoicePhase] = useState('listening'); // listening|thinking|speaking
+  const [status, setStatus] = useState('IDLE');              // IDLE|RUNNING|ERROR
   const [isConnected, setIsConnected] = useState(false);
-  const [backendAddress] = useState('127.0.0.1:8000');
   const [inputText, setInputText] = useState('');
   const [replyText, setReplyText] = useState('');
-  const [history, setHistory] = useState([]);
-  const [historyIndex, setHistoryIndex] = useState(-1);
-  const [inputFocused, setInputFocused] = useState(false);
-  // Agent telemetry: what TARS is doing right now, and any destructive action
-  // waiting on the user's yes/no.
+  const [transcript, setTranscript] = useState('');
   const [activity, setActivity] = useState([]);
   const [pendingConfirm, setPendingConfirm] = useState(null);
+  const [history, setHistory] = useState([]);
+  const [historyIndex, setHistoryIndex] = useState(-1);
 
   const inputRef = useRef(null);
-  const replyEndRef = useRef(null);
   const contentRef = useRef(null);
+  const replyEndRef = useRef(null);
+  const abortRef = useRef(null);
 
-  // Panel height follows its content (like Spotlight growing with results)
-  // instead of sitting at a fixed size with a void under short replies.
+  // Latest mode for callbacks that outlive their render (speech events fire
+  // asynchronously and would otherwise close over a stale value).
+  const modeRef = useRef(mode);
+  modeRef.current = mode;
+
+  const isMac = typeof window !== 'undefined' && window.electronAPI?.platform === 'darwin';
+
+  // Long-lived singletons. Recreating these per render would drop the
+  // AudioContext and the mic stream on every state change.
+  const audio = useRef(null);
+  if (!audio.current) audio.current = new AudioEngine(BACKEND);
+  const mic = useRef(null);
+  if (!mic.current) mic.current = new MicLevel();
+  const wake = useRef(null);
+
+  // ------------------------------------------------------------------
+  // Spectrum sources for the visualiser
+  // ------------------------------------------------------------------
+  const micSpectrum = useCallback(() => mic.current.spectrum(), []);
+  const ttsSpectrum = useCallback(() => audio.current.spectrum(), []);
+
+  // ------------------------------------------------------------------
+  // Speaking state drives the island between "thinking" and "speaking"
+  // ------------------------------------------------------------------
+  useEffect(() => {
+    return audio.current.subscribe((speaking) => {
+      setVoicePhase((prev) => {
+        if (speaking) return 'speaking';
+        // Stopped speaking: fall back to thinking while the stream is still
+        // running, otherwise the island is done.
+        return prev === 'speaking' ? 'thinking' : prev;
+      });
+    });
+  }, []);
+
+  // ------------------------------------------------------------------
+  // Panel height follows content, like Spotlight growing with results
+  // ------------------------------------------------------------------
   const [contentHeight, setContentHeight] = useState(null);
   useEffect(() => {
     const el = contentRef.current;
     if (!el) return;
-    const ro = new ResizeObserver(([entry]) => {
-      setContentHeight(entry.contentRect.height);
-    });
+    const ro = new ResizeObserver(([entry]) => setContentHeight(entry.contentRect.height));
     ro.observe(el);
     return () => ro.disconnect();
-  }, [uiState]);
-  const uiStateRef = useRef(uiState);  // latest uiState for async callbacks
-  uiStateRef.current = uiState;
-  
-  const audioQueue = useRef([]);
-  const isPlaying = useRef(false);
-  const audioContext = useRef(null);
-  const currentAudioSource = useRef(null);
-  const audioGeneration = useRef(0); // bumped by stopAudio() to invalidate in-flight fetches
+  }, [mode]);
 
-  // macOS renders the listening island as a solid-black notch-blended bar;
-  // every other platform gets a floating frosted-glass pill.
-  const isMac = typeof window !== 'undefined' && window.electronAPI?.platform === 'darwin';
+  // ------------------------------------------------------------------
+  // Voice flow
+  // ------------------------------------------------------------------
+  const startVoiceCapture = useCallback(async () => {
+    // Stop the wake listener explicitly rather than relying on the mode effect.
+    // Chromium allows one active SpeechRecognition at a time, and the effect
+    // wouldn't run until after this render — long enough for the always-on
+    // listener and the command capture to collide and abort each other.
+    wake.current?.stop();
 
-  const readyAudioBuffers = useRef([]);
-  const isFetching = useRef(false);
+    setTranscript('');
+    setVoicePhase('listening');
+    setMode(MODE.VOICE);
 
-  const stopAudio = () => {
-     audioQueue.current = [];
-     readyAudioBuffers.current = [];
-     audioGeneration.current += 1; // any in-flight playNextAudio() call becomes stale
-     if (currentAudioSource.current) {
-         try { currentAudioSource.current.stop(); } catch {}
-         currentAudioSource.current = null;
-     }
-     isPlaying.current = false;
-  };
+    // Level metering runs alongside recognition so the bars track real speech.
+    await mic.current.start();
 
-  const processAudioQueue = async () => {
-     if (isFetching.current || audioQueue.current.length === 0) return;
-     isFetching.current = true;
-     
-     if (!audioContext.current) {
-         audioContext.current = new (window.AudioContext || window.webkitAudioContext)();
-     }
-     
-     while (audioQueue.current.length > 0) {
-         const text = audioQueue.current.shift();
-         const genId = audioGeneration.current;
-         try {
-             const response = await fetch(`http://${backendAddress}/api/v1/audio/tars-tts?text=${encodeURIComponent(text)}`);
-             if (audioGeneration.current !== genId) continue;
-             const arrayBuffer = await response.arrayBuffer();
-             if (audioGeneration.current !== genId) continue;
-             const audioBuffer = await audioContext.current.decodeAudioData(arrayBuffer);
-             if (audioGeneration.current !== genId) continue;
-             
-             readyAudioBuffers.current.push(audioBuffer);
-             
-             if (!isPlaying.current) playNextAudio();
-         } catch (e) {
-             console.error("Audio fetch error", e);
-         }
-     }
-     isFetching.current = false;
-  };
+    const spoken = await captureCommand({ onInterim: setTranscript });
 
-  const playNextAudio = () => {
-    if (isPlaying.current || readyAudioBuffers.current.length === 0) return;
-    isPlaying.current = true;
-    
-    if (!audioContext.current) {
-        audioContext.current = new (window.AudioContext || window.webkitAudioContext)();
-    }
-    
-    const audioBuffer = readyAudioBuffers.current.shift();
-    const source = audioContext.current.createBufferSource();
-    source.buffer = audioBuffer;
-    source.connect(audioContext.current.destination);
-    currentAudioSource.current = source;
-    
-    source.onended = () => {
-        currentAudioSource.current = null;
-        isPlaying.current = false;
-        playNextAudio();
-    };
-    source.start(0);
-  };
-
-  const speakText = (text) => {
-    // Strip <display> tags, markdown, and [...] brackets completely to avoid speaking scaffolding
-    const cleanText = text
-      .replace(/<display>[\s\S]*?<\/display>/gi, '')
-      .replace(/\[.*?\]/g, '')
-      .replace(/<[^>]+>/g, '')
-      .replace(/[*_~`#]/g, '')
-      .trim();
-      
-    if (!cleanText) return;
-    audioQueue.current.push(cleanText);
-    processAudioQueue();
-  };
-
-  // Speak a single line and resolve only once it has finished playing. Used for
-  // the wake-word greeting so we can hold off on recording the command until
-  // TARS has stopped talking (otherwise the greeting bleeds into the mic).
-  const playClipAndWait = (text) =>
-    new Promise((resolve) => {
-      (async () => {
-        const cleanText = (text || '').trim();
-        if (!cleanText) return resolve();
-        try {
-          if (!audioContext.current) {
-            audioContext.current = new (window.AudioContext || window.webkitAudioContext)();
-          }
-          const response = await fetch(
-            `http://${backendAddress}/api/v1/audio/tars-tts?text=${encodeURIComponent(cleanText)}`
-          );
-          const arrayBuffer = await response.arrayBuffer();
-          const audioBuffer = await audioContext.current.decodeAudioData(arrayBuffer);
-          const source = audioContext.current.createBufferSource();
-          source.buffer = audioBuffer;
-          source.connect(audioContext.current.destination);
-          currentAudioSource.current = source;
-          source.onended = () => {
-            currentAudioSource.current = null;
-            resolve();
-          };
-          source.start(0);
-        } catch (e) {
-          console.error('Greeting play error', e);
-          resolve();
-        }
-      })();
-    });
-
-  // A few TARS-flavored acknowledgements, à la Google Assistant's chime.
-  const WAKE_GREETINGS = [
-    "Yeah?",
-    "I'm listening.",
-    "Go ahead.",
-    "TARS online. What do you need?",
-    "At your service.",
-    "Ready when you are.",
-  ];
-
-  const recognitionRef = useRef(null);
-  const isListeningRef = useRef(false);
-
-  useEffect(() => {
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      console.warn("Speech Recognition not supported in this browser.");
+    if (!spoken) {
+      mic.current.stop();
+      setTranscript('');
+      setMode(MODE.HIDDEN);
       return;
     }
-    
-    const recognition = new SpeechRecognition();
-    recognition.continuous = true;
-    recognition.interimResults = true;
-    recognition.lang = 'en-US';
-    recognitionRef.current = recognition;
 
-    recognition.onresult = async (event) => {
-      let finalTranscript = '';
-      let interimTranscript = '';
-      for (let i = event.resultIndex; i < event.results.length; ++i) {
-        if (event.results[i].isFinal) {
-          finalTranscript += event.results[i][0].transcript;
-        } else {
-          interimTranscript += event.results[i][0].transcript;
-        }
-      }
-
-      const text = (finalTranscript || interimTranscript).toLowerCase().trim();
-      
-      // Check for wake word if we are in IDLE
-      if (uiStateRef.current === 'IDLE' && /\b(tars|tar|tarz|taz|tarss|tares|tarce|tarts)\b/.test(text)) {
-         recognition.stop();
-         
-         if (window.electronAPI) window.electronAPI.requestShow();
-         stopAudio();
-         setUiState('VOICE_LISTENING');
-         
-         const greeting = WAKE_GREETINGS[Math.floor(Math.random() * WAKE_GREETINGS.length)];
-         await playClipAndWait(greeting);
-         
-         if (uiStateRef.current === 'VOICE_LISTENING') {
-            listenViaBackend();
-         }
-      }
-    };
-
-    recognition.onend = () => {
-      // Auto-restart if we're in IDLE and it stopped unexpectedly
-      if (uiStateRef.current === 'IDLE' && isListeningRef.current) {
-        try { recognition.start(); } catch (e) {}
-      }
-    };
-
-    if (uiState === 'IDLE') {
-       isListeningRef.current = true;
-       try { recognition.start(); } catch (e) {}
-    } else {
-       isListeningRef.current = false;
-       try { recognition.stop(); } catch (e) {}
-    }
-
-    return () => {
-      isListeningRef.current = false;
-      try { recognition.stop(); } catch (e) {}
-    }
-  }, [uiState]);
-
-  const listenViaBackend = () => {
-    setStatus('LISTENING');
-    stopAudio();
-    
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      setStatus('IDLE');
-      setUiState(prev => prev === 'VOICE_LISTENING' ? 'IDLE' : prev);
-      return;
-    }
-    
-    const recognition = new SpeechRecognition();
-    recognition.continuous = false;
-    recognition.interimResults = false;
-    recognition.lang = 'en-US';
-    
-    let hasResult = false;
-    
-    recognition.onresult = (event) => {
-      hasResult = true;
-      const text = event.results[0][0].transcript;
-      setStatus('IDLE');
-      if (text && text.trim()) {
-        setInputText(text);
-        dispatchQuery(text);
-      } else {
-        setUiState(prev => prev === 'VOICE_LISTENING' ? 'IDLE' : prev);
-      }
-    };
-    
-    recognition.onerror = (e) => {
-       console.error("Speech recognition error:", e);
-       setStatus('ERROR');
-       setTimeout(() => setStatus('IDLE'), 2000);
-       setUiState(prev => prev === 'VOICE_LISTENING' ? 'IDLE' : prev);
-    };
-    
-    recognition.onend = () => {
-       if (!hasResult) {
-          setStatus('IDLE');
-          setUiState(prev => prev === 'VOICE_LISTENING' ? 'IDLE' : prev);
-       }
-    };
-    
-    try {
-      recognition.start();
-    } catch(e) {
-      console.error(e);
-      setStatus('ERROR');
-      setUiState(prev => prev === 'VOICE_LISTENING' ? 'IDLE' : prev);
-    }
-  };
-
-  // Poll connection status
-  useEffect(() => {
-    const interval = setInterval(async () => {
-       try {
-         await fetch(`http://${backendAddress}/docs`);
-         setIsConnected(true);
-       } catch {
-         setIsConnected(false);
-       }
-    }, 5000);
-    return () => clearInterval(interval);
-  }, [backendAddress]);
-
-  // Listen to Electron IPC Events
-  useEffect(() => {
-    if (window.electronAPI) {
-      window.electronAPI.onSummonText(() => {
-        stopAudio();
-        setUiState('TEXT_INPUT');
-        setStatus('IDLE');
-        setTimeout(() => { if (inputRef.current) inputRef.current.focus(); }, 100);
-      });
-
-      window.electronAPI.onSummonVoice(() => {
-        stopAudio();
-        setUiState('VOICE_LISTENING');
-        listenViaBackend();
-      });
-    }
-    // Register IPC listeners once on mount.
+    setTranscript(spoken);
+    mic.current.stop();
+    setVoicePhase('thinking');
+    dispatchQuery(spoken, { voice: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Scroll to bottom of replies
-  useEffect(() => {
-    if (replyEndRef.current && uiState === 'EXPANDED_CHAT') {
-      replyEndRef.current.scrollIntoView({ behavior: 'smooth' });
-    }
-  }, [replyText, uiState]);
+  const onWake = useCallback(
+    async (trailing) => {
+      if (window.electronAPI) window.electronAPI.requestShow();
+      audio.current.stop();
 
-  // If hidden, notify main process to hide window
-  useEffect(() => {
-    if (uiState === 'IDLE' && window.electronAPI) {
-      window.electronAPI.hideOverlay();
-      stopAudio();
-      setInputText('');
+      setMode(MODE.VOICE);
+      setVoicePhase('speaking');
       setReplyText('');
-    }
-  }, [uiState]);
+      setActivity([]);
 
-  // Drive the main-process "voice mode": slide the window to the top-center of
-  // the screen (notch on macOS) and pin it open while we're listening or idle.
+      // "Hey TARS, what's the weather" — the command came with the wake phrase,
+      // so skip the greeting and act on it directly. That's the difference
+      // between a demo and something you'd actually use.
+      if (trailing && trailing.split(/\s+/).length >= 2) {
+        setTranscript(trailing);
+        setVoicePhase('thinking');
+        dispatchQuery(trailing, { voice: true });
+        return;
+      }
+
+      const greeting = WAKE_GREETINGS[Math.floor(Math.random() * WAKE_GREETINGS.length)];
+      await audio.current.speakAndWait(greeting);
+
+      if (modeRef.current === MODE.VOICE) startVoiceCapture();
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [startVoiceCapture]
+  );
+
+  // ------------------------------------------------------------------
+  // Wake listener — armed only while hidden
+  // ------------------------------------------------------------------
   useEffect(() => {
-    window.electronAPI?.setVoiceMode?.(uiState === 'VOICE_LISTENING' || uiState === 'IDLE');
-  }, [uiState]);
+    if (!isSpeechSupported()) {
+      console.warn('[TARS] Speech recognition unavailable; wake word disabled.');
+      return;
+    }
+    if (!wake.current) {
+      wake.current = new WakeListener({
+        onWake,
+        onError: (msg) => console.warn('[TARS]', msg),
+      });
+    }
 
-  // Human-readable labels for the agent's tool activity chips.
-  const TOOL_LABELS = {
-    launch_app: 'Opening app', open_website: 'Opening', set_volume: 'Adjusting volume',
-    media_control: 'Media', clipboard: 'Clipboard', notify: 'Notifying',
-    system_info: 'Checking system', run_shell: 'Running command', power_control: 'Power',
-    find_files: 'Searching files', read_file: 'Reading file', write_file: 'Writing file',
-    move_file: 'Moving file', delete_file: 'Deleting', web_search: 'Searching the web',
-    fetch_page: 'Reading page', browser_open: 'Browsing', browser_click: 'Clicking',
-    browser_type: 'Typing', browser_read: 'Reading page', set_personality: 'Adjusting personality',
-  };
+    // Only listen for "Hey TARS" when idle. Leaving it armed during a
+    // conversation makes TARS wake itself on its own spoken replies.
+    if (mode === MODE.HIDDEN) wake.current.start();
+    else wake.current.stop();
 
-  // Agent stream events: tool_start / tool_result / confirm.
-  const handleAgentEvent = (evt) => {
+    return () => wake.current?.stop();
+  }, [mode, onWake]);
+
+  // ------------------------------------------------------------------
+  // Backend health
+  // ------------------------------------------------------------------
+  useEffect(() => {
+    let cancelled = false;
+    const ping = async () => {
+      try {
+        const r = await fetch(`http://${BACKEND}/health`);
+        if (!cancelled) setIsConnected(r.ok);
+      } catch {
+        if (!cancelled) setIsConnected(false);
+      }
+    };
+    ping();
+    const interval = setInterval(ping, 5000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, []);
+
+  // ------------------------------------------------------------------
+  // Electron IPC
+  // ------------------------------------------------------------------
+  useEffect(() => {
+    if (!window.electronAPI) return;
+    window.electronAPI.onSummonText(() => {
+      audio.current.stop();
+      setMode((m) => (m === MODE.CHAT ? MODE.CHAT : MODE.TEXT));
+      setStatus('IDLE');
+      setTimeout(() => inputRef.current?.focus(), 80);
+    });
+    window.electronAPI.onSummonVoice(() => {
+      audio.current.stop();
+      startVoiceCapture();
+    });
+    // Registered once on mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Tell the main process when to pin the window to the top of the screen.
+  useEffect(() => {
+    window.electronAPI?.setVoiceMode?.(mode === MODE.VOICE);
+  }, [mode]);
+
+  // Hiding must also tear down audio and the mic, or TARS keeps talking to an
+  // empty screen with the OS recording indicator still lit.
+  useEffect(() => {
+    if (mode !== MODE.HIDDEN) return;
+    window.electronAPI?.hideOverlay?.();
+    audio.current.stop();
+    mic.current.stop();
+    abortRef.current?.abort();
+    setInputText('');
+    setReplyText('');
+    setTranscript('');
+    setActivity([]);
+    setPendingConfirm(null);
+    setStatus('IDLE');
+  }, [mode]);
+
+  useEffect(() => {
+    if (mode === MODE.CHAT) replyEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [replyText, mode]);
+
+  // ------------------------------------------------------------------
+  // Agent events
+  // ------------------------------------------------------------------
+  const handleAgentEvent = useCallback((evt) => {
     if (evt.type === 'tool_start') {
-      setActivity((prev) => [
-        ...prev,
-        { name: evt.name, label: TOOL_LABELS[evt.name] || evt.name, state: 'running' },
-      ]);
+      setActivity((prev) => [...prev, { name: evt.name, label: toolLabel(evt.name), state: 'running' }]);
     } else if (evt.type === 'tool_result') {
-      // Mark the most recent running entry for this tool as settled.
       setActivity((prev) => {
         const next = [...prev];
         for (let i = next.length - 1; i >= 0; i--) {
@@ -377,518 +268,249 @@ export default function App() {
       });
     } else if (evt.type === 'confirm') {
       setPendingConfirm({ id: evt.id, prompt: evt.prompt, name: evt.name });
-      // A confirmation needs the panel visible even if this began as voice.
-      setUiState('EXPANDED_CHAT');
+      // A confirmation needs buttons, so surface the full panel even mid-voice.
+      setMode(MODE.CHAT);
     }
-  };
+  }, []);
 
-  const respondToConfirm = async (approved) => {
+  const respondToConfirm = useCallback(async (approved) => {
     const current = pendingConfirm;
     if (!current) return;
     setPendingConfirm(null);
     try {
-      await fetch(`http://${backendAddress}/api/v1/confirm`, {
+      await fetch(`http://${BACKEND}/api/v1/confirm`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id: current.id, approved }),
       });
     } catch (e) {
-      console.error('Confirmation failed to send', e);
-      setReplyText((prev) => prev + '\n[ERROR]: could not send confirmation.');
+      console.error('[TARS] Confirmation failed to send', e);
     }
-  };
+  }, [pendingConfirm]);
 
-  // Dispatch query to backend
-  const dispatchQuery = async (query) => {
+  // ------------------------------------------------------------------
+  // Query dispatch
+  // ------------------------------------------------------------------
+  const dispatchQuery = useCallback(async (query, { voice = false } = {}) => {
     if (!query.trim()) return;
 
     setHistory((prev) => [query, ...prev.slice(0, 49)]);
     setHistoryIndex(-1);
 
-    // Default to EXPANDED_CHAT if they typed it. If voice, stay in voice until <display>
-    if (uiState !== 'VOICE_LISTENING') {
-      setUiState('EXPANDED_CHAT');
-    }
-    
+    // Typed queries grow the bar into the panel. Spoken ones stay on the
+    // island — the answer is being read aloud, so a wall of text is noise.
+    if (!voice) setMode(MODE.CHAT);
+
     setStatus('RUNNING');
     setReplyText('');
     setActivity([]);
     setPendingConfirm(null);
-    stopAudio(); // Stop old speech
+    audio.current.stop();
+
+    const controller = new AbortController();
+    abortRef.current = controller;
 
     try {
-      const response = await fetch(`http://${backendAddress}/api/v1/chat/stream`, {
+      const response = await fetch(`http://${BACKEND}/api/v1/chat/stream`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: [{ role: 'user', content: query }] })
+        body: JSON.stringify({ messages: [{ role: 'user', content: query }] }),
+        signal: controller.signal,
       });
+      if (!response.body) throw new Error('No response body');
 
-      if (!response.body) throw new Error("No response body");
       const reader = response.body.getReader();
-      const decoder = new TextDecoder("utf-8");
+      const decoder = new TextDecoder('utf-8');
 
-      let sentenceBuffer = "";
-      let fullBuffer = "";
-      let lineBuffer = "";  // holds a partial SSE line split across network chunks
+      let spokenBuffer = '';   // accumulates until a sentence boundary
+      let fullBuffer = '';
+      let lineBuffer = '';     // holds a partial SSE line split across chunks
 
-      while (true) {
+      for (;;) {
         const { value, done } = await reader.read();
         if (done) {
-           setStatus('DONE');
-           if (sentenceBuffer.trim()) {
-               speakText(sentenceBuffer.trim());
-           }
-           break;
+          if (spokenBuffer.trim()) audio.current.speak(spokenBuffer.trim());
+          setStatus('DONE');
+          break;
         }
 
         lineBuffer += decoder.decode(value, { stream: true });
         const lines = lineBuffer.split('\n');
-        // Keep the last (possibly incomplete) segment for the next read so we
-        // never JSON.parse a half-received line and silently drop its token.
+        // Keep the last (possibly incomplete) segment so we never JSON.parse a
+        // half-received line and silently drop its token.
         lineBuffer = lines.pop();
 
         for (const line of lines) {
-           if (line.startsWith('data: ')) {
-               const dataStr = line.replace('data: ', '').trim();
-               if (dataStr === '{}') continue; 
-               try {
-                  const data = JSON.parse(dataStr);
-                  if (data.chunk) {
-                     fullBuffer += data.chunk;
-                     
-                     // Detect screen display request
-                     if (fullBuffer.includes('<display>')) {
-                        setUiState('EXPANDED_CHAT');
-                     }
-                     
-                     setReplyText(fullBuffer);
+          if (!line.startsWith('data: ')) continue;
+          const raw = line.slice(6).trim();
+          if (!raw || raw === '{}') continue;
 
-                     // Buffer speech chunks
-                     sentenceBuffer += data.chunk;
-                     
-                     // Speak on punctuation boundaries for natural flow. Keep trailing punctuation!
-                     const match = sentenceBuffer.match(/([\s\S]*?[.!?])(?:\s+|$)([\s\S]*)/);
-                     if (match) {
-                         speakText(match[1].trim());
-                         sentenceBuffer = match[2];
-                     } else if (sentenceBuffer.length > 200) {
-                         // Emergency split if too long without punctuation
-                         speakText(sentenceBuffer.trim());
-                         sentenceBuffer = "";
-                     }
-                  } else if (data.event) {
-                     handleAgentEvent(data.event);
-                  } else if (data.detail) {
-                     setStatus('ERROR');
-                     setReplyText(prev => prev + "\n[ERROR]: " + data.detail);
-                  }
-               } catch {}
-           }
+          let data;
+          try { data = JSON.parse(raw); } catch { continue; }
+
+          if (data.chunk) {
+            fullBuffer += data.chunk;
+            setReplyText(fullBuffer);
+            if (fullBuffer.includes('<display>')) setMode(MODE.CHAT);
+
+            spokenBuffer += data.chunk;
+            // Speak on sentence boundaries so playback starts early but never
+            // mid-clause.
+            const match = spokenBuffer.match(/([\s\S]*?[.!?])(?:\s+|$)([\s\S]*)/);
+            if (match) {
+              audio.current.speak(match[1].trim());
+              spokenBuffer = match[2];
+            } else if (spokenBuffer.length > 220) {
+              audio.current.speak(spokenBuffer.trim());
+              spokenBuffer = '';
+            }
+          } else if (data.event) {
+            handleAgentEvent(data.event);
+          } else if (data.detail) {
+            setStatus('ERROR');
+            setReplyText((p) => p + '\n[ERROR]: ' + data.detail);
+          }
         }
       }
     } catch (e) {
-      console.error(e);
-      setStatus('ERROR');
+      if (e.name !== 'AbortError') {
+        console.error('[TARS] Stream failed', e);
+        setStatus('ERROR');
+        setReplyText((p) => p + '\n[ERROR]: could not reach the backend.');
+      }
+    } finally {
+      abortRef.current = null;
     }
-  };
+  }, [handleAgentEvent]);
 
-  const toggleVoiceInput = () => {
-    if (status === 'LISTENING') {
-       // Backend doesn't support manual abort yet, so we just wait
-    } else {
-       stopAudio(); // Stop TARS's own playback first so it doesn't bleed into the mic
-       listenViaBackend();
-    }
-  };
+  // Once the reply is fully spoken, a voice session should end on its own.
+  useEffect(() => {
+    if (mode !== MODE.VOICE || status === 'RUNNING') return;
+    const t = setTimeout(() => {
+      if (modeRef.current === MODE.VOICE && !audio.current.isPlaying) setMode(MODE.HIDDEN);
+    }, 2600);
+    return () => clearTimeout(t);
+  }, [mode, status, voicePhase]);
 
+  // ------------------------------------------------------------------
+  // Handlers
+  // ------------------------------------------------------------------
   const handleSubmit = (e) => {
     e.preventDefault();
-    dispatchQuery(inputText);
+    const q = inputText;
     setInputText('');
+    dispatchQuery(q);
   };
+
+  const handleStop = () => {
+    abortRef.current?.abort();
+    audio.current.stop();
+    setStatus('IDLE');
+  };
+
+  const handleClose = () => setMode(MODE.HIDDEN);
 
   const handleKeyDown = (e) => {
     if (e.key === 'Escape') {
       // Escape must not silently abandon a held action — treat it as a denial
       // so the agent loop unblocks instead of waiting out its timeout.
-      if (pendingConfirm) {
-        respondToConfirm(false);
-        return;
-      }
-      setUiState('IDLE');
-    } else if (e.key === 'ArrowUp' && (uiState === 'TEXT_INPUT' || uiState === 'EXPANDED_CHAT')) {
-      if (history.length > 0 && historyIndex < history.length - 1) {
-        const nextIndex = historyIndex + 1;
-        setHistoryIndex(nextIndex);
-        setInputText(history[nextIndex]);
-      }
-    } else if (e.key === 'ArrowDown' && (uiState === 'TEXT_INPUT' || uiState === 'EXPANDED_CHAT')) {
-      if (historyIndex > 0) {
-        const nextIndex = historyIndex - 1;
-        setHistoryIndex(nextIndex);
-        setInputText(history[nextIndex]);
-      } else if (historyIndex === 0) {
-        setHistoryIndex(-1);
-        setInputText('');
-      }
+      if (pendingConfirm) { respondToConfirm(false); return; }
+      handleClose();
+    } else if (e.key === 'ArrowUp' && history.length > 0 && historyIndex < history.length - 1) {
+      const next = historyIndex + 1;
+      setHistoryIndex(next);
+      setInputText(history[next]);
+    } else if (e.key === 'ArrowDown' && historyIndex > 0) {
+      const next = historyIndex - 1;
+      setHistoryIndex(next);
+      setInputText(history[next]);
     }
   };
 
-  const handleClose = (e) => {
-    e.stopPropagation();
-    setUiState('IDLE');
+  const toggleVoice = () => {
+    if (mode === MODE.VOICE) { mic.current.stop(); setMode(MODE.HIDDEN); }
+    else { audio.current.stop(); startVoiceCapture(); }
   };
 
-  // Human copy, not console output. "PROCESSING" / "SYS.READY" reads as sci-fi
-  // set dressing; Apple's HUDs say what is happening in plain words.
-  const getStatusLabel = () => {
-    switch (status) {
-      case 'RUNNING': return 'Thinking';
-      case 'LISTENING': return 'Listening';
-      case 'ERROR': return 'Something went wrong';
-      case 'DONE':
-      default: return 'Ready';
-    }
-  };
+  // ------------------------------------------------------------------
+  // Render
+  // ------------------------------------------------------------------
+  if (mode === MODE.HIDDEN) return null;
 
-  const statusDotColor = {
-    RUNNING: 'var(--color-state-busy)',
-    LISTENING: 'var(--color-accent)',
-    ERROR: 'var(--color-state-error)',
-  }[status] || 'var(--color-state-active)';
-
-  // Apple's HUD spring: settles quickly, no perceptible bounce. A HUD that
-  // wobbles on entry feels like a toy.
-  const SPRING = { type: 'spring', stiffness: 420, damping: 38, mass: 0.9 };
-
-  if (uiState === 'IDLE') return null;
+  const expanded = mode === MODE.CHAT;
 
   return (
     <div
       className={`w-full h-full flex justify-center bg-transparent ${
-        uiState === 'VOICE_LISTENING' ? 'items-start' : 'items-center'
+        mode === MODE.VOICE ? 'items-start' : 'items-center'
       }`}
       onKeyDown={handleKeyDown}
       onClick={handleClose}
     >
-      <motion.div
-        // NOTE: no `layout` prop. Width/height are animated explicitly below,
-        // and framer's layout projection would visually move the panel while
-        // its children still lay out in the un-projected box — which silently
-        // clipped the header off the top of the panel.
-        onClick={(e) => e.stopPropagation()}
-        // Enters by rising and settling, not by zooming — matches how Spotlight
-        // and Control Center arrive.
-        initial={{ opacity: 0, scale: 0.96, y: -8 }}
-        animate={
-          uiState === 'TEXT_INPUT'
-            ? { width: 620, height: 60, scale: 1, opacity: 1, y: 0 }
-            : uiState === 'EXPANDED_CHAT'
-            ? {
-                width: 660,
-                // Clamped: never smaller than the header+input can occupy,
-                // never taller than the 800px transparent shell can host.
-                height: Math.min(Math.max(contentHeight ?? 240, 190), 560),
-                scale: 1, opacity: 1, y: 0,
-              }
-            : uiState === 'VOICE_LISTENING'
-            ? { width: isMac ? 380 : 320, height: 52, scale: 1, opacity: 1, y: isMac ? 0 : 10 }
-            : { opacity: 0 }
-        }
-        exit={{ opacity: 0, scale: 0.96, y: -8 }}
-        transition={{ ...SPRING, layout: SPRING }}
-        style={{
-          WebkitAppRegion: 'drag',
-          // Radius is per-state: on macOS the listening island keeps a square
-          // top edge (flush under the notch) with rounded bottom corners.
-          borderRadius:
-            uiState === 'VOICE_LISTENING'
-              ? (isMac ? '0 0 var(--radius-island) var(--radius-island)' : 'var(--radius-island)')
-              : 'var(--radius-panel)',
-          // macOS listening island: solid black so it merges with the notch.
-          ...(uiState === 'VOICE_LISTENING' && isMac
-            ? { background: '#000', border: 'none', boxShadow: '0 10px 28px rgba(0,0,0,0.55)' }
-            : {}),
-        }}
-        className={`${
-          uiState === 'VOICE_LISTENING' && isMac ? '' : 'glass-panel'
-        } relative flex flex-col items-center justify-center overflow-hidden select-none ${
-          uiState === 'VOICE_LISTENING' ? 'cursor-pointer' : 'cursor-grab active:cursor-grabbing'
-        }`}
-      >
-        <AnimatePresence mode="wait">
-          {uiState === 'VOICE_LISTENING' && (
-            <motion.div
-              key="voice-state"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              transition={{ duration: 0.25 }}
-              style={{ WebkitAppRegion: 'no-drag' }}
-              className={`w-full h-full flex items-center px-5 ${
-                isMac ? 'justify-between' : 'justify-center gap-3'
-              }`}
-              onClick={() => setUiState('TEXT_INPUT')}
-              title="Click to type instead"
-            >
-              {/* Mic + live equalizer, grouped so they stay to one side of the
-                  notch on macOS. */}
-              <div className="flex items-center gap-3.5 shrink-0">
-                {/* Mic with a slow breathing ring — presence without anxiety. */}
-                <div className="relative flex items-center justify-center">
-                  <span
-                    aria-hidden
-                    className="absolute inset-[-7px] rounded-full"
-                    style={{
-                      background: 'var(--color-accent)',
-                      animation: 'breathe 2.6s ease-in-out infinite',
-                    }}
-                  />
-                  <Mic size={15} className="relative text-white/95" />
-                </div>
-
-                {/* Monochrome levels. A rainbow gradient reads as a media
-                    player; Apple keeps voice input achromatic so the accent
-                    stays meaningful. */}
-                <div className="flex items-end justify-center gap-[3px] h-4">
-                  {[0, 1, 2, 3, 4, 5, 6].map((i) => (
-                    <motion.span
-                      key={i}
-                      className="w-[2.5px] h-full rounded-full bg-white/85"
-                      style={{ transformOrigin: 'bottom' }}
-                      animate={{ scaleY: [0.22, 1, 0.38, 0.82, 0.28] }}
-                      transition={{
-                        duration: 1.15,
-                        repeat: Infinity,
-                        ease: 'easeInOut',
-                        delay: i * 0.085,
-                      }}
-                    />
-                  ))}
-                </div>
-              </div>
-
-              {/* Reserve the physical notch width on macOS so nothing renders
-                  behind the cutout. Tune 170px to your specific MacBook. */}
-              {isMac && <div aria-hidden className="w-[170px] shrink-0" />}
-
-              <span className="shrink-0 text-[12px] font-medium text-label-secondary select-none">
-                Listening
-              </span>
-            </motion.div>
-          )}
-
-          {(uiState === 'TEXT_INPUT' || uiState === 'EXPANDED_CHAT') && (
-            <motion.div
-              key="panel-state"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              transition={{ duration: 0.2 }}
-              ref={contentRef}
-              style={{ WebkitAppRegion: 'no-drag' }}
-              className={`w-full flex flex-col cursor-default select-text ${
-                uiState === 'EXPANDED_CHAT' ? 'p-5' : 'h-full px-3 py-2 justify-center'
-              }`}
-            >
-              {uiState === 'EXPANDED_CHAT' && (
-                <>
-                  <div className="flex items-center justify-between mb-4 pb-3 border-b-[0.5px] border-hairline text-[12px]">
-                    <div className="flex items-center gap-2">
-                      <span
-                        className={`w-[7px] h-[7px] rounded-full ${
-                          status === 'RUNNING' || status === 'LISTENING' ? 'animate-pulse' : ''
-                        }`}
-                        style={{ background: statusDotColor }}
-                      />
-                      <span className="font-medium text-label">{getStatusLabel()}</span>
-                    </div>
-
-                    <div className="flex items-center gap-3">
-                      {/* Connection is only worth surfacing when it's broken —
-                          a healthy state needs no badge. */}
-                      {!isConnected && (
-                        <span
-                          className="flex items-center gap-1.5 text-[11px]"
-                          style={{ color: 'var(--color-state-error)' }}
-                          title={`Cannot reach backend at ${backendAddress}`}
-                        >
-                          <WifiOff size={11} />
-                          Offline
-                        </span>
-                      )}
-                      <button
-                        onClick={handleClose}
-                        className="flex items-center justify-center w-6 h-6 rounded-full text-label-tertiary hover:text-label hover:bg-white/10 transition-colors cursor-pointer"
-                        title="Hide overlay"
-                        style={{ WebkitAppRegion: 'no-drag' }}
-                      >
-                        <X size={13} />
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* What the agent is actually doing, step by step. */}
-                  {activity.length > 0 && (
-                    <div className="flex flex-wrap gap-1.5 mb-3">
-                      {activity.map((a, i) => (
-                        <span
-                          key={i}
-                          className="flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] bg-white/8 text-label-secondary"
-                        >
-                          <span
-                            className="w-1.5 h-1.5 rounded-full shrink-0"
-                            style={{
-                              background:
-                                a.state === 'done'
-                                  ? 'var(--color-state-success, #4ade80)'
-                                  : a.state === 'failed'
-                                  ? 'var(--color-state-error)'
-                                  : 'var(--color-accent)',
-                              opacity: a.state === 'running' ? 0.6 : 1,
-                            }}
-                          />
-                          {a.label}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-
-                  {/* Destructive action held for approval. */}
-                  <AnimatePresence>
-                    {pendingConfirm && (
-                      <motion.div
-                        initial={{ opacity: 0, y: -6 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        exit={{ opacity: 0, y: -6 }}
-                        className="w-full mb-3 p-3 rounded-xl border"
-                        style={{
-                          borderColor: 'var(--color-state-error)',
-                          background: 'rgba(255,69,58,0.08)',
-                          WebkitAppRegion: 'no-drag',
-                        }}
-                      >
-                        <div className="text-[13px] text-label mb-2.5 leading-snug select-text">
-                          {pendingConfirm.prompt}
-                        </div>
-                        <div className="flex gap-2">
-                          <button
-                            onClick={() => respondToConfirm(true)}
-                            autoFocus
-                            className="px-3 py-1 rounded-lg text-[12px] font-medium text-white cursor-pointer"
-                            style={{ background: 'var(--color-state-error)' }}
-                          >
-                            Allow
-                          </button>
-                          <button
-                            onClick={() => respondToConfirm(false)}
-                            className="px-3 py-1 rounded-lg text-[12px] bg-white/10 text-label hover:bg-white/15 cursor-pointer"
-                          >
-                            Deny
-                          </button>
-                        </div>
-                      </motion.div>
-                    )}
-                  </AnimatePresence>
-
-                  <div className="w-full overflow-y-auto no-scrollbar pr-1 max-h-[380px] mb-4 text-label text-[14.5px] leading-[1.55] select-text">
-                    {replyText ? (
-                      <div className="whitespace-pre-wrap">
-                        {/* Format <display> tags cleanly if shown */}
-                        {replyText.replace(/<display>/g, '\n').replace(/<\/display>/g, '\n')}
-                        {status === 'RUNNING' && <span className="cursor-blink" />}
-                      </div>
-                    ) : (
-                      <div className="text-label-tertiary select-none">
-                        {status === 'LISTENING' ? 'Listening…' : 'Ask anything.'}
-                      </div>
-                    )}
-                    <div ref={replyEndRef} />
-                  </div>
-                </>
-              )}
-
-              <form
-                onSubmit={handleSubmit}
-                style={{ borderRadius: 'var(--radius-field)', WebkitAppRegion: 'no-drag' }}
-                className={`relative flex items-center w-full gap-1 ${
-                  // In the compact state the panel *is* the search bar — nesting a
-                  // second bordered field inside it reads as a redundant frame.
-                  // The well only appears once there's a transcript above it.
-                  uiState === 'EXPANDED_CHAT'
-                    ? `px-2 py-1.5 glass-field ${inputFocused ? 'glass-field-focused' : ''}`
-                    : 'px-2.5 py-1.5 bg-transparent'
-                }`}
-              >
-                <button
-                  type="button"
-                  onClick={toggleVoiceInput}
-                  className={`flex items-center justify-center w-8 h-8 shrink-0 transition-colors duration-200 cursor-pointer ${
-                    status === 'LISTENING'
-                      ? 'text-white pulse-mic-icon'
-                      : 'text-label-secondary hover:text-label hover:bg-white/8'
-                  }`}
-                  style={{
-                    borderRadius: 'var(--radius-control)',
-                    ...(status === 'LISTENING'
-                      ? { background: 'var(--color-accent)' }
-                      : {}),
-                  }}
-                  title={status === 'LISTENING' ? 'Stop listening' : 'Voice input'}
-                >
-                  <Mic size={15} />
-                </button>
-
-                <input
-                  ref={inputRef}
-                  type="text"
-                  value={inputText}
-                  onChange={(e) => setInputText(e.target.value)}
-                  onFocus={() => setInputFocused(true)}
-                  onBlur={() => setInputFocused(false)}
-                  placeholder={status === 'LISTENING' ? 'Listening…' : 'Ask TARS anything'}
-                  disabled={status === 'LISTENING'}
-                  className="flex-1 bg-transparent border-0 outline-none ring-0 shadow-none text-label text-[15px] px-1.5 h-8 placeholder:text-label-tertiary"
-                  autoFocus
-                />
-
-                {/* Send only materializes once there's something to send —
-                    a permanently dimmed button is visual noise. */}
-                <AnimatePresence>
-                  {inputText.trim() && status !== 'LISTENING' && (
-                    <motion.button
-                      type="submit"
-                      initial={{ opacity: 0, scale: 0.7 }}
-                      animate={{ opacity: 1, scale: 1 }}
-                      exit={{ opacity: 0, scale: 0.7 }}
-                      transition={{ duration: 0.14 }}
-                      style={{ background: 'var(--color-accent)', borderRadius: 'var(--radius-control)' }}
-                      className="flex items-center justify-center w-8 h-8 shrink-0 text-white cursor-pointer hover:brightness-110 transition-[filter]"
-                      title="Send"
-                    >
-                      <Send size={14} />
-                    </motion.button>
-                  )}
-                </AnimatePresence>
-              </form>
-
-              {uiState === 'EXPANDED_CHAT' && (
-                <div className="flex items-center justify-end gap-3 mt-2.5 text-[11px] text-label-tertiary select-none">
-                  <span><kbd className="font-sans">esc</kbd> to dismiss</span>
-                  <span><kbd className="font-sans">↑↓</kbd> history</span>
-                </div>
-              )}
-            </motion.div>
-          )}
-        </AnimatePresence>
-        
-        {/* The globe is an ambient presence indicator, not decoration — it only
-            belongs on screen while TARS is actually listening or thinking.
-            Hanging it under a resting panel just read as a stray artifact. */}
-        {(status === 'LISTENING' || status === 'RUNNING') && (
-           <Globe isListening={status === 'LISTENING'} isProcessing={status === 'RUNNING'} />
+      <AnimatePresence mode="wait">
+        {mode === MODE.VOICE ? (
+          <div key="voice" onClick={(e) => e.stopPropagation()}>
+            <VoiceIsland
+              mode={voicePhase}
+              getSpectrum={voicePhase === 'speaking' ? ttsSpectrum : micSpectrum}
+              transcript={transcript}
+              caption={replyText}
+              isMac={isMac}
+              onClick={() => { mic.current.stop(); setMode(MODE.CHAT); }}
+            />
+          </div>
+        ) : (
+          <motion.div
+            key="panel"
+            onClick={(e) => e.stopPropagation()}
+            // Rises and settles rather than zooming — matches how Spotlight and
+            // Control Center arrive.
+            initial={{ opacity: 0, scale: 0.96, y: -10 }}
+            animate={{
+              width: expanded ? 680 : 620,
+              // Both states measure their own content rather than using a fixed
+              // height. A hardcoded collapsed height silently clipped the input
+              // row, and would break again under OS font scaling.
+              height: expanded
+                // Clamped: never taller than the 800px transparent shell hosts.
+                ? Math.min(Math.max(contentHeight ?? 240, 190), 580)
+                : (contentHeight ?? 76),
+              opacity: 1,
+              scale: 1,
+              y: 0,
+            }}
+            exit={{ opacity: 0, scale: 0.96, y: -10 }}
+            transition={SPRING}
+            style={{
+              WebkitAppRegion: 'drag',
+              borderRadius: 'var(--radius-panel)',
+            }}
+            className="glass-panel sheen relative flex flex-col overflow-hidden select-none
+                       cursor-grab active:cursor-grabbing"
+          >
+            <CommandPanel
+              expanded={expanded}
+              inputText={inputText}
+              onInputChange={setInputText}
+              onSubmit={handleSubmit}
+              onVoice={toggleVoice}
+              onStop={handleStop}
+              onClose={handleClose}
+              onKeyDown={handleKeyDown}
+              replyText={replyText}
+              status={status}
+              activity={activity}
+              pendingConfirm={pendingConfirm}
+              onConfirm={respondToConfirm}
+              isConnected={isConnected}
+              isListening={false}
+              inputRef={inputRef}
+              contentRef={contentRef}
+              replyEndRef={replyEndRef}
+            />
+          </motion.div>
         )}
-      </motion.div>
+      </AnimatePresence>
     </div>
   );
 }
