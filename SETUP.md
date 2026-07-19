@@ -57,12 +57,24 @@ tars.bat --reinstall   # force dependency reinstall
 
 Edit `Backend/.env` (created automatically on first run).
 
-**Groq — recommended.** Get a key at <https://console.groq.com/keys>:
+**Groq — fastest, but watch the free-tier budget.** Key at <https://console.groq.com/keys>:
 ```env
 LLM_PROVIDER=groq
 LLM_MODEL=llama-3.3-70b-versatile
 GROQ_API_KEY=gsk_...
 ```
+
+> **Token budget matters more than you'd expect.** Every request ships the full
+> tool schema (~1,800 tokens) plus the system prompt (~400), so an agent turn
+> costs ~2,200 tokens *before* the conversation. Groq's free tier allows
+> **100,000 tokens per day, per model** — roughly **40 requests/day**, and a
+> multi-step task spends several. When it runs out you get a clear
+> "daily token limit reached" message in the overlay.
+>
+> The daily cap is **per model**, so switching `LLM_MODEL` to
+> `llama-3.1-8b-instant` gives a fresh budget (and is much cheaper per call,
+> though weaker at multi-step tool use). For genuinely unlimited use, run
+> Ollama below.
 
 **Ollama — fully local, no key, no cloud.** Tool calling needs a model that
 supports it:
@@ -117,10 +129,16 @@ a TARS-like word. That is deliberate: matching bare "tars" fired constantly on
 ordinary speech containing "start", "cars", or "stars". Common mishearings
 ("tarts", "czars", "stars") are all accepted after a prefix.
 
-> Wake-word detection uses the browser Speech API, which in Chromium sends audio
-> to Google's servers for transcription and needs a network connection. If you
-> want a fully offline wake word, that requires a local model such as Porcupine
-> or openWakeWord.
+> Wake-word detection runs **entirely on your machine**: the overlay records
+> short voice-activity-gated clips and transcribes them with the faster-whisper
+> model the backend already loads. No audio leaves the computer, and it works
+> offline.
+>
+> It deliberately does *not* use the browser Speech API. That API exists in
+> Electron but can never work — Chromium implements it by streaming audio to
+> Google's servers with an API key baked into Chrome builds, which Electron
+> doesn't ship. It fails instantly and forever, which is what floods the console
+> with `chunked_data_pipe_upload_data_stream ... Error: -2`.
 
 ### Making it feel built in
 1. **Start at login** — tray menu → *Start at login*. TARS boots hidden into the
@@ -196,6 +214,16 @@ Additional hard limits:
 
 ## 7. Operational notes
 
+**Only one backend may hold port 8000.** The Electron app health-checks the
+port and reuses whatever answers, so an orphaned server from an earlier run will
+silently serve stale code — replies fail in ways the current source can't
+explain. On Windows `pkill -f Main.py` often fails to match; check and clear with:
+
+```
+netstat -ano | findstr :8000
+taskkill /PID <pid> /F
+```
+
 **Run the backend single-process.** Pending confirmations are held in memory in
 `services/confirm.py`: the SSE stream parks a future there and `POST
 /api/v1/confirm` resolves it. Split those across processes and every
@@ -221,7 +249,10 @@ turns. It does not survive a backend restart. `POST /api/v1/reset` clears it.
 | Confirmation says "unknown or expired" | Backend reloaded or multi-worker — see §7 |
 | Overlay shows "Offline" | Backend not up; run `tars.bat --backend` and read the traceback |
 | `Alt+Space` does nothing | Another app owns the shortcut |
-| "Hey TARS" never wakes it | Mic permission denied, or no network (the Speech API needs one). Check the console for a TARS warning. |
+| "Hey TARS" never wakes it | Mic permission denied, or Whisper failed to load — check the backend log for "Whisper/faster-whisper unavailable" |
+| `chunked_data_pipe_upload_data_stream` flood | A build still using the browser Speech API. Rebuild the frontend. |
+| "daily token limit reached" | Groq free tier is 100k tokens/day per model. Switch model or use Ollama — see §3. |
+| Replies stopped working after edits | A stale backend may still hold port 8000. See §7. |
 | It wakes at random | Report the phrase — the matcher lives in `frontend/src/lib/speech.js` and is unit-testable |
 | Listening bars stay flat | Mic blocked for level metering; recognition may still work. Grant microphone access. |
 | Volume fails on Windows | `pip install pycaw comtypes` |

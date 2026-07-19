@@ -150,16 +150,13 @@ async def _open_native(target: str) -> None:
 @tool(
     name="launch_app",
     description=(
-        "Open a native desktop application by its everyday name, e.g. 'spotify', "
-        "'calculator', 'vs code', 'terminal'. Use open_website for anything on the web."
+        "Open a native desktop app by its everyday name (spotify, calculator, "
+        "vs code, terminal). For web pages use open_website."
     ),
     parameters={
         "type": "object",
         "properties": {
-            "app_name": {
-                "type": "string",
-                "description": "Conversational name of the application, e.g. 'calculator'.",
-            }
+            "app_name": {"type": "string", "description": "e.g. 'calculator'."}
         },
         "required": ["app_name"],
     },
@@ -212,28 +209,16 @@ async def launch_app(app_name: str) -> Dict[str, Any]:
 @tool(
     name="open_website",
     description=(
-        "Open a web page in the user's default browser. Strongly prefer this over "
-        "browser automation. Pass `site` plus an optional `query` to land directly on "
-        "a search or results page — e.g. site='youtube', query='lofi hip hop' opens "
-        "YouTube's results for that search. Known sites: "
-        + ", ".join(sorted(_SITES)) +
-        ". Or pass an explicit `url` instead."
+        "Open a web page in the user's default browser. Prefer this over browser_*. "
+        "site+query deep-links to results (site='youtube', query='lofi' opens that "
+        "search). Sites: " + ",".join(sorted(_SITES)) + ". Or pass url."
     ),
     parameters={
         "type": "object",
         "properties": {
-            "site": {
-                "type": "string",
-                "description": "Short site name, e.g. 'youtube', 'google', 'maps', 'github'.",
-            },
-            "query": {
-                "type": "string",
-                "description": "Optional search text to deep-link into that site's results.",
-            },
-            "url": {
-                "type": "string",
-                "description": "Explicit URL, used instead of site/query.",
-            },
+            "site": {"type": "string", "description": "e.g. 'youtube', 'maps'."},
+            "query": {"type": "string", "description": "Search text for that site."},
+            "url": {"type": "string", "description": "Explicit URL instead of site."},
         },
         "required": [],
     },

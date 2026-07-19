@@ -26,10 +26,8 @@ from . import browser   # noqa: F401  Playwright control
 @tool(
     name="set_personality",
     description=(
-        "Adjust one of TARS's own personality dials. Call this ONLY when the user "
-        "explicitly asks to change how you behave — e.g. 'TARS, humor sixty percent', "
-        "'be more concise', 'stop sugarcoating it'. Never call it in response to an "
-        "ordinary question or remark."
+        "Adjust a personality dial. ONLY when the user explicitly asks to change "
+        "how you behave ('humor sixty percent', 'be more concise'). Never otherwise."
     ),
     parameters={
         "type": "object",

@@ -38,21 +38,14 @@ async def _run(*args: str, timeout: float = 20.0) -> subprocess.CompletedProcess
 # --------------------------------------------------------------------------
 @tool(
     name="set_volume",
-    description="Set the system output volume to a percentage from 0 to 100, or mute/unmute.",
+    description="Set output volume 0-100, or mute/unmute.",
     parameters={
         "type": "object",
         "properties": {
-            "level": {
-                # Union type on purpose: models emit "60" as often as 60, and
-                # Groq validates tool args server-side and hard-rejects a
-                # mismatch mid-stream.
-                "type": ["integer", "string"],
-                "description": "Target volume 0-100. Omit when using `mute`.",
-            },
-            "mute": {
-                "type": "boolean",
-                "description": "True to mute, False to unmute. Omit to just set level.",
-            },
+            # Union type on purpose: models emit "60" as often as 60, and Groq
+            # validates tool args server-side and hard-rejects a mismatch mid-stream.
+            "level": {"type": ["integer", "string"], "description": "0-100."},
+            "mute": {"type": "boolean", "description": "True to mute."},
         },
         "required": [],
     },
@@ -127,8 +120,7 @@ async def set_volume(level: Any = None, mute: Optional[bool] = None) -> Dict[str
 @tool(
     name="media_control",
     description=(
-        "Control whatever is currently playing audio or video system-wide "
-        "(Spotify, YouTube in a browser, a video player). Sends the OS media keys."
+        "Play/pause/skip whatever is playing system-wide. Sends OS media keys."
     ),
     parameters={
         "type": "object",
@@ -206,12 +198,12 @@ async def media_control(action: str) -> Dict[str, Any]:
 # --------------------------------------------------------------------------
 @tool(
     name="clipboard",
-    description="Read the user's clipboard, or write text to it.",
+    description="Read or write the clipboard.",
     parameters={
         "type": "object",
         "properties": {
             "action": {"type": "string", "enum": ["read", "write"]},
-            "text": {"type": "string", "description": "Text to copy, when action is 'write'."},
+            "text": {"type": "string", "description": "Text to copy when writing."},
         },
         "required": ["action"],
     },
@@ -239,8 +231,7 @@ async def clipboard(action: str, text: Optional[str] = None) -> Dict[str, Any]:
 @tool(
     name="notify",
     description=(
-        "Show a native desktop notification. Use for reminders or to surface a result "
-        "the user should see after they've moved on."
+        "Show a native desktop notification."
     ),
     parameters={
         "type": "object",
@@ -292,8 +283,7 @@ async def notify(title: str, message: str) -> Dict[str, Any]:
 @tool(
     name="system_info",
     description=(
-        "Get the current time and date, OS details, battery level, and disk space. "
-        "Use this instead of guessing the date or the machine's state."
+        "Current time, date, OS, battery, CPU, disk. Never guess these."
     ),
     parameters={"type": "object", "properties": {}, "required": []},
 )
@@ -330,9 +320,8 @@ async def system_info() -> Dict[str, Any]:
 @tool(
     name="run_shell",
     description=(
-        "Run a shell command (PowerShell on Windows, sh on macOS/Linux) for anything "
-        "no other tool covers. Prefer a purpose-built tool when one exists. Destructive "
-        "commands are held for the user's confirmation automatically."
+        "Run a shell command (PowerShell on Windows, sh elsewhere) when no other "
+        "tool fits. Destructive commands are confirmed automatically."
     ),
     parameters={
         "type": "object",
@@ -376,7 +365,7 @@ async def run_shell(command: str) -> Dict[str, Any]:
 # --------------------------------------------------------------------------
 @tool(
     name="power_control",
-    description="Lock, sleep, restart, or shut down the machine.",
+    description="Lock, sleep, restart, or shut down.",
     parameters={
         "type": "object",
         "properties": {

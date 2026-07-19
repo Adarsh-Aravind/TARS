@@ -25,10 +25,14 @@ except Exception as e:
     whisper_model = None
 
 
-def transcribe_sync(audio_bytes: bytes) -> str:
+def transcribe_sync(audio_bytes: bytes, suffix: str = ".wav") -> str:
     """
-    Transcribe WAV-encoded audio bytes locally with faster-whisper.
+    Transcribe audio bytes locally with faster-whisper.
     Synchronous — safe to call from worker threads (the VoiceEngine loop).
+
+    `suffix` must match the actual container. The overlay records webm/opus
+    (MediaRecorder's only reliable format in Chromium), and writing that to a
+    file named .wav makes ffmpeg pick the wrong demuxer and return nothing.
     """
     if not whisper_model:
         return ""
@@ -36,7 +40,7 @@ def transcribe_sync(audio_bytes: bytes) -> str:
     tmp_path = None
     try:
         # faster-whisper expects a path or file-like object.
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
             tmp.write(audio_bytes)
             tmp_path = tmp.name
 
@@ -55,6 +59,7 @@ def transcribe_sync(audio_bytes: bytes) -> str:
 
 class TranscriptionService:
     @staticmethod
-    async def transcribe_audio(audio_bytes: bytes) -> str:
+    async def transcribe_audio(audio_bytes: bytes, filename: str = "") -> str:
         # Offload the blocking model call to a thread so we don't stall the loop.
-        return await asyncio.to_thread(transcribe_sync, audio_bytes)
+        suffix = os.path.splitext(filename)[1] or ".wav"
+        return await asyncio.to_thread(transcribe_sync, audio_bytes, suffix)

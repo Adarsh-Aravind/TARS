@@ -79,24 +79,17 @@ def _describe(p: Path) -> Dict[str, Any]:
 @tool(
     name="find_files",
     description=(
-        "Search the user's files by name. `folder` accepts shortcuts like 'desktop', "
-        "'downloads', 'documents', or a path. Returns matching paths."
+        "Find files by name. folder accepts 'desktop'/'downloads'/'documents' or a path."
     ),
     parameters={
         "type": "object",
         "properties": {
             "pattern": {
                 "type": "string",
-                "description": "Glob pattern or plain substring, e.g. '*.pdf' or 'invoice'.",
+                "description": "Glob or substring, e.g. '*.pdf' or 'invoice'.",
             },
-            "folder": {
-                "type": "string",
-                "description": "Where to search. Defaults to the home directory.",
-            },
-            "recursive": {
-                "type": "boolean",
-                "description": "Search subfolders too. Defaults to true.",
-            },
+            "folder": {"type": "string", "description": "Default: home."},
+            "recursive": {"type": "boolean", "description": "Default true."},
         },
         "required": ["pattern"],
     },
@@ -143,7 +136,7 @@ async def find_files(
 
 @tool(
     name="read_file",
-    description="Read the contents of a text file so you can answer questions about it.",
+    description="Read a text file's contents.",
     parameters={
         "type": "object",
         "properties": {"path": {"type": "string", "description": "Path to the file."}},
@@ -180,8 +173,7 @@ async def read_file(path: str) -> Dict[str, Any]:
 @tool(
     name="write_file",
     description=(
-        "Create a new text file or overwrite an existing one. Overwriting an existing "
-        "file asks the user first."
+        "Create or overwrite a text file."
     ),
     parameters={
         "type": "object",
@@ -208,7 +200,7 @@ async def write_file(path: str, content: str) -> Dict[str, Any]:
 
 @tool(
     name="move_file",
-    description="Move or rename a file or folder. Always asks the user first.",
+    description="Move or rename a file or folder.",
     parameters={
         "type": "object",
         "properties": {
@@ -236,8 +228,7 @@ async def move_file(source: str, destination: str) -> Dict[str, Any]:
 @tool(
     name="delete_file",
     description=(
-        "Delete a file or folder by moving it to the system trash where possible. "
-        "Always asks the user first."
+        "Delete a file or folder (moved to trash)."
     ),
     parameters={
         "type": "object",

@@ -96,9 +96,8 @@ def _guard(fn):
 @tool(
     name="browser_open",
     description=(
-        "Open a URL in TARS's own controllable Chromium window (separate from the "
-        "user's default browser). Use this ONLY when the task needs clicking, typing, "
-        "or reading page content — otherwise use open_website. Returns the page text."
+        "Open a URL in TARS's own Chromium (NOT the user's browser). Only when the "
+        "task needs clicking/typing/reading. Otherwise use open_website."
     ),
     parameters={
         "type": "object",
@@ -126,21 +125,13 @@ async def browser_open(url: str) -> Dict[str, Any]:
 @tool(
     name="browser_click",
     description=(
-        "Click something on the page TARS has open, found by its visible text or an "
-        "accessible label. Returns the page state afterwards."
+        "Click an element on TARS's open page, by visible text."
     ),
     parameters={
         "type": "object",
         "properties": {
-            "text": {
-                "type": "string",
-                "description": "Visible text of the link, button, or element to click.",
-            },
-            "index": {
-                "type": "integer",
-                "description": "Which match to click when several have the same text. "
-                               "0 is the first. Defaults to 0.",
-            },
+            "text": {"type": "string", "description": "Visible text to click."},
+            "index": {"type": "integer", "description": "Nth match, default 0."},
         },
         "required": ["text"],
     },
@@ -179,22 +170,14 @@ async def browser_click(text: str, index: int = 0) -> Dict[str, Any]:
 @tool(
     name="browser_type",
     description=(
-        "Type text into a field on the page TARS has open, optionally pressing Enter. "
-        "Identify the field by its placeholder or label."
+        "Type into a field on TARS's open page."
     ),
     parameters={
         "type": "object",
         "properties": {
             "text": {"type": "string", "description": "Text to type."},
-            "field": {
-                "type": "string",
-                "description": "Placeholder or label of the input. Omit to use the "
-                               "page's main search box.",
-            },
-            "submit": {
-                "type": "boolean",
-                "description": "Press Enter after typing. Defaults to true.",
-            },
+            "field": {"type": "string", "description": "Placeholder/label; omit for main input."},
+            "submit": {"type": "boolean", "description": "Press Enter, default true."},
         },
         "required": ["text"],
     },
@@ -234,7 +217,7 @@ async def browser_type(text: str, field: Optional[str] = None, submit: bool = Tr
 
 @tool(
     name="browser_read",
-    description="Read the current text content of the page TARS has open in its browser.",
+    description="Read the text of TARS's currently open page.",
     parameters={"type": "object", "properties": {}, "required": []},
 )
 @_guard

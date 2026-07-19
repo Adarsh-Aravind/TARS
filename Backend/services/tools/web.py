@@ -47,18 +47,14 @@ def _unwrap_ddg(url: str) -> str:
 @tool(
     name="web_search",
     description=(
-        "Search the web and read back the top results. Use this for current facts, "
-        "news, prices, or anything past your training data — never guess at these. "
-        "This returns text to you; it does not open a browser for the user."
+        "Search the web and read the top results. Use for current facts, news, or "
+        "prices — never guess those. Returns text; does not open a browser."
     ),
     parameters={
         "type": "object",
         "properties": {
             "query": {"type": "string", "description": "The search query."},
-            "count": {
-                "type": "integer",
-                "description": "How many results to return, 1-8. Defaults to 5.",
-            },
+            "count": {"type": "integer", "description": "1-8, default 5."},
         },
         "required": ["query"],
     },
@@ -109,8 +105,7 @@ async def web_search(query: str, count: int = 5) -> Dict[str, Any]:
 @tool(
     name="fetch_page",
     description=(
-        "Fetch a web page and return its readable text. Use after web_search when a "
-        "snippet isn't enough, or when the user gives you a URL to summarise."
+        "Fetch a page and return its readable text."
     ),
     parameters={
         "type": "object",

@@ -14,8 +14,10 @@ Emitted events (each yielded as a JSON string):
     {"type": "confirm",     "id": str, "prompt": str, "name": str}
     {"type": "error",       "data": str}
 """
+import asyncio
 import json
 import logging
+import re
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from openai import (
@@ -36,6 +38,33 @@ logger = logging.getLogger(__name__)
 # How many model->tools->model round trips one user turn may take. High enough
 # for real multi-step tasks, low enough that a confused model can't spin.
 MAX_ITERATIONS = 8
+
+
+# --------------------------------------------------------------------------
+# Rate-limit parsing
+# --------------------------------------------------------------------------
+# Groq reports which bucket was exhausted and when it frees up only inside the
+# error *message*, not in a structured field. The distinction matters a lot:
+# a per-minute cap is worth sleeping through, a per-day cap means the assistant
+# is done until tomorrow and the user needs to hear that plainly.
+_DAILY_RE = re.compile(r"per day|\bTPD\b|\bRPD\b", re.IGNORECASE)
+_RETRY_RE = re.compile(r"try again in\s+(?:(\d+)m)?([\d.]+)s", re.IGNORECASE)
+_USAGE_RE = re.compile(r"Limit (\d+), Used (\d+)", re.IGNORECASE)
+
+
+def _is_daily_limit(e: Exception) -> bool:
+    return bool(_DAILY_RE.search(str(e)))
+
+
+def _retry_after_seconds(e: Exception, default: float = 8.0) -> float:
+    match = _RETRY_RE.search(str(e))
+    if not match:
+        return default
+    minutes = float(match.group(1) or 0)
+    seconds = float(match.group(2) or 0)
+    # Capped: holding an SSE stream open longer than this is worse for the user
+    # than reporting the failure and letting them retry.
+    return min(minutes * 60 + seconds + 0.5, 25.0)
 
 
 class LLMEngine:
@@ -120,17 +149,39 @@ class LLMEngine:
     # ------------------------------------------------------------------
     # One streamed model call
     # ------------------------------------------------------------------
+    async def _create_stream(self, messages: List[Dict[str, Any]]):
+        """Open a streamed completion, retrying once through a rate limit.
+
+        Groq's free tier allows 12k tokens/minute, and one agent turn re-sends
+        the tool schema on every iteration — so brushing the limit mid-task is
+        routine rather than exceptional. The window is per-minute and the reset
+        is usually seconds away, so a single wait recovers the turn instead of
+        failing it in the user's face.
+        """
+        for attempt in range(2):
+            try:
+                return await self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    temperature=self.temperature,
+                    max_tokens=settings.MAX_TOKENS,
+                    stream=True,
+                    tools=TOOLS_SCHEMA,
+                    tool_choice="auto",
+                )
+            except RateLimitError as e:
+                # Only a per-minute bucket is worth waiting out. A daily cap
+                # resets hours away, so retrying just delays the bad news.
+                if attempt == 1 or _is_daily_limit(e):
+                    raise
+                delay = _retry_after_seconds(e)
+                logger.warning("Rate limited; retrying in %.1fs", delay)
+                await asyncio.sleep(delay)
+        raise RuntimeError("unreachable")
+
     async def _stream_once(self, messages: List[Dict[str, Any]]):
         """Run one completion. Yields ("token", str); returns collected tool calls."""
-        response = await self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            temperature=self.temperature,
-            max_tokens=settings.MAX_TOKENS,
-            stream=True,
-            tools=TOOLS_SCHEMA,
-            tool_choice="auto",
-        )
+        response = await self._create_stream(messages)
 
         content = ""
         tool_calls: Dict[int, Dict[str, str]] = {}
@@ -291,7 +342,21 @@ class LLMEngine:
         if isinstance(e, AuthenticationError):
             return f"{self.provider} rejected the API key. Check Backend/.env."
         if isinstance(e, RateLimitError):
-            return f"{self.provider} rate limit hit. Wait a moment and retry."
+            wait = _retry_after_seconds(e, default=0)
+            usage = _USAGE_RE.search(str(e))
+            used = f" ({usage.group(2)} of {usage.group(1)} used)" if usage else ""
+
+            if _is_daily_limit(e):
+                # The common failure on Groq's free tier: 100k tokens/day, and
+                # every agent request re-sends the tool schema.
+                return (
+                    f"{self.provider} daily token limit reached{used}. Each request "
+                    f"sends the full tool schema, so the free tier runs out after a "
+                    f"few dozen. Switch LLM_PROVIDER to ollama in Backend/.env for "
+                    f"unlimited local use, or upgrade at console.groq.com/settings/billing."
+                )
+            when = f" Try again in about {int(wait)}s." if wait else ""
+            return f"{self.provider} rate limit reached{used}.{when}"
         if isinstance(e, BadRequestError):
             return (
                 f"{self.provider} rejected the request — often an unsupported tool schema "

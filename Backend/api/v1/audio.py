@@ -17,7 +17,7 @@ async def transcribe_audio(file: UploadFile = File(...)):
     """
     try:
         content = await file.read()
-        transcript = await TranscriptionService.transcribe_audio(content)
+        transcript = await TranscriptionService.transcribe_audio(content, file.filename or "")
         return {"transcript": transcript}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

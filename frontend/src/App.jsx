@@ -5,8 +5,8 @@ import VoiceIsland from './components/VoiceIsland';
 import CommandPanel from './components/CommandPanel';
 import { toolLabel } from './lib/toolLabels';
 import { AudioEngine } from './lib/audioEngine';
-import { MicLevel } from './lib/micLevel';
-import { WakeListener, captureCommand, isSpeechSupported } from './lib/speech';
+import { AudioCapture } from './lib/audioCapture';
+import { WakeListener, captureCommand } from './lib/speech';
 
 const BACKEND = '127.0.0.1:8000';
 
@@ -67,7 +67,7 @@ export default function App() {
   const audio = useRef(null);
   if (!audio.current) audio.current = new AudioEngine(BACKEND);
   const mic = useRef(null);
-  if (!mic.current) mic.current = new MicLevel();
+  if (!mic.current) mic.current = new AudioCapture();
   const wake = useRef(null);
 
   // ------------------------------------------------------------------
@@ -97,7 +97,14 @@ export default function App() {
   useEffect(() => {
     const el = contentRef.current;
     if (!el) return;
-    const ro = new ResizeObserver(([entry]) => setContentHeight(entry.contentRect.height));
+    const ro = new ResizeObserver(([entry]) => {
+      // borderBoxSize, NOT contentRect. contentRect reports the *content* box,
+      // which excludes the panel's 14px top and bottom padding — sizing the
+      // shell to it made every panel 28px too short, so content sat misaligned
+      // and the input row was clipped off the bottom.
+      const box = entry.borderBoxSize?.[0]?.blockSize;
+      setContentHeight(box ?? el.getBoundingClientRect().height);
+    });
     ro.observe(el);
     return () => ro.disconnect();
   }, [mode]);
@@ -106,20 +113,22 @@ export default function App() {
   // Voice flow
   // ------------------------------------------------------------------
   const startVoiceCapture = useCallback(async () => {
-    // Stop the wake listener explicitly rather than relying on the mode effect.
-    // Chromium allows one active SpeechRecognition at a time, and the effect
-    // wouldn't run until after this render — long enough for the always-on
-    // listener and the command capture to collide and abort each other.
+    // Stop the wake listener explicitly rather than relying on the mode effect:
+    // it and the command capture would otherwise both hold a MediaRecorder on
+    // the same stream, and the effect doesn't run until after this render.
     wake.current?.stop();
 
     setTranscript('');
     setVoicePhase('listening');
     setMode(MODE.VOICE);
 
-    // Level metering runs alongside recognition so the bars track real speech.
+    // One mic owner drives both the level meter and the recording.
     await mic.current.start();
 
-    const spoken = await captureCommand({ onInterim: setTranscript });
+    const spoken = await captureCommand({
+      capture: mic.current,
+      backendAddress: BACKEND,
+    });
 
     if (!spoken) {
       mic.current.stop();
@@ -168,12 +177,10 @@ export default function App() {
   // Wake listener — armed only while hidden
   // ------------------------------------------------------------------
   useEffect(() => {
-    if (!isSpeechSupported()) {
-      console.warn('[TARS] Speech recognition unavailable; wake word disabled.');
-      return;
-    }
     if (!wake.current) {
       wake.current = new WakeListener({
+        capture: mic.current,
+        backendAddress: BACKEND,
         onWake,
         onError: (msg) => console.warn('[TARS]', msg),
       });
@@ -232,10 +239,16 @@ export default function App() {
   // Hiding must also tear down audio and the mic, or TARS keeps talking to an
   // empty screen with the OS recording indicator still lit.
   useEffect(() => {
+    // Typing means no voice is in play, so release the mic and clear the OS
+    // recording indicator.
+    if (mode === MODE.TEXT || mode === MODE.CHAT) mic.current.stop();
+
     if (mode !== MODE.HIDDEN) return;
     window.electronAPI?.hideOverlay?.();
     audio.current.stop();
-    mic.current.stop();
+    // NOT mic.stop(): while hidden the wake listener owns the mic, and its
+    // effect runs before this one — stopping here would kill the stream it
+    // just acquired and silently disable "Hey TARS".
     abortRef.current?.abort();
     setInputText('');
     setReplyText('');
