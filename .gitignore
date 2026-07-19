@@ -150,3 +150,9 @@ kokoro-v0_19.onnx
 voices.json
 voices.bin
 restart_trigger.txt
+
+# TARS runtime personality dials (per-machine)
+Backend/personality.json
+
+# IDE directories
+.claude/

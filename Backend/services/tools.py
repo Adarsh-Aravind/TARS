@@ -51,6 +51,36 @@ TOOLS_SCHEMA = [
                 "required": ["command"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_personality",
+            "description": (
+                "Adjust one of TARS's own personality dials. Call this ONLY when the "
+                "user explicitly asks to change how you behave — e.g. 'TARS, humor "
+                "sixty percent', 'be more concise', 'stop sugarcoating it'. Never call "
+                "it in response to an ordinary question or remark."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "setting": {
+                        "type": "string",
+                        "enum": ["humor", "honesty", "verbosity"],
+                        "description": "Which dial to adjust."
+                    },
+                    "level": {
+                        # Union type on purpose: models emit "60" as often as 60, and
+                        # Groq validates tool args server-side and hard-rejects a
+                        # mismatch mid-stream. set_setting() coerces and clamps.
+                        "type": ["integer", "string"],
+                        "description": "New level from 0 to 100."
+                    }
+                },
+                "required": ["setting", "level"]
+            }
+        }
     }
 ]
 
@@ -190,6 +220,11 @@ async def handle_tool_call(tool_name: str, arguments: Dict[str, Any]) -> Dict[st
         return await launch_app(arguments.get("app_name", ""))
     elif tool_name == "set_volume":
         return await set_volume(arguments.get("level", 50))
+    elif tool_name == "set_personality":
+        from services import personality
+        return personality.set_setting(
+            arguments.get("setting", ""), arguments.get("level", 50)
+        )
     elif tool_name == "run_system_command":
         command = arguments.get("command", "")
         if not command:

@@ -1,22 +1,19 @@
 import json
 import logging
 from typing import List, Dict, Any, Optional, AsyncGenerator
-from openai import AsyncOpenAI
+from openai import (
+    AsyncOpenAI,
+    APIConnectionError,
+    APITimeoutError,
+    AuthenticationError,
+    RateLimitError,
+)
 
 from config import settings
 from services.tools import handle_tool_call, TOOLS_SCHEMA
+from services import personality
 
 logger = logging.getLogger(__name__)
-
-# A strict system prompt designed to prevent hallucinations and enforce strict tool usage.
-SYSTEM_PROMPT = """You are TARS, an elite desktop OS automated assistant execution backend. 
-You are highly logical, efficient, and slightly sarcastic (Humor setting: 75%). 
-You are completely honest (Honesty setting: 90%).
-You communicate decisions strictly using the provided tools. 
-Do not guess or hallucinate parameters. 
-If a required action lacks a tool, report it cleanly without formatting empty commands.
-If you have large visual data, code, or information that needs to be shown on screen, FIRST ask the user "Would you like me to display this on your screen?". 
-If they approve, output the data wrapped perfectly inside <display>...</display> tags. Your spoken response should remain concise."""
 
 
 class LLMEngine:
@@ -44,7 +41,19 @@ class LLMEngine:
     def __init__(self, provider: Optional[str] = None):
         active_provider = provider or settings.LLM_PROVIDER
 
-        if active_provider == "ollama":
+        if active_provider == "groq":
+            # Groq serves an OpenAI-compatible API, so the SDK works unchanged —
+            # only the base URL and key differ.
+            if not settings.GROQ_API_KEY:
+                raise RuntimeError(
+                    "LLM_PROVIDER=groq but GROQ_API_KEY is unset. "
+                    "Copy Backend/.env.example to Backend/.env and set it."
+                )
+            self.client = AsyncOpenAI(
+                base_url=settings.GROQ_BASE_URL,
+                api_key=settings.GROQ_API_KEY,
+            )
+        elif active_provider == "ollama":
             self.client = AsyncOpenAI(
                 base_url=settings.OLLAMA_BASE_URL + "/v1",
                 api_key="ollama",  # required by the SDK, ignored by Ollama
@@ -81,8 +90,12 @@ class LLMEngine:
 
     def _build_messages(self, session_id: str, user_message: str) -> List[Dict[str, Any]]:
         history = self._session_history.setdefault(
-            session_id, [{"role": "system", "content": SYSTEM_PROMPT}]
+            session_id, [{"role": "system", "content": ""}]
         )
+        # Rebuild the system prompt every turn: the personality dials can be
+        # changed mid-conversation (via the set_personality tool), and a stale
+        # system message would keep the old settings until the next restart.
+        history[0] = {"role": "system", "content": personality.build_system_prompt()}
         history.append({"role": "user", "content": user_message})
         # Trim the *stored* history in place, not just the returned copy —
         # otherwise the in-memory history grows unbounded for the lifetime of
@@ -185,10 +198,22 @@ class LLMEngine:
 
         except Exception as e:
             logger.error(f"Error in LLM stream: {e}", exc_info=True)
-            yield json.dumps({
-                "type": "error",
-                "data": f"LLM connection failed. Ensure {self.provider} is running.",
-            })
+            # Distinguish "can't reach the provider" from "the provider answered
+            # with an error" — the old catch-all blamed connectivity for what
+            # were often schema/auth/rate-limit failures, which sends you
+            # debugging the wrong thing.
+            if isinstance(e, (APIConnectionError, APITimeoutError)):
+                if self.provider == "ollama":
+                    detail = f"Cannot reach Ollama at {settings.OLLAMA_BASE_URL}. Is it running?"
+                else:
+                    detail = f"Cannot reach {self.provider}. Check your network connection."
+            elif isinstance(e, AuthenticationError):
+                detail = f"{self.provider} rejected the API key. Check your .env."
+            elif isinstance(e, RateLimitError):
+                detail = f"{self.provider} rate limit hit. Wait a moment and retry."
+            else:
+                detail = f"{self.provider} error: {e}"
+            yield json.dumps({"type": "error", "data": detail})
 
 # Backwards-compatible alias
 LLMService = LLMEngine

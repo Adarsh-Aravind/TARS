@@ -1,10 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Mic, Send, Wifi, WifiOff, X } from 'lucide-react';
+import { Mic, Send, WifiOff, X } from 'lucide-react';
 import Globe from './Globe';
 
 export default function App() {
-  const [uiState, setUiState] = useState('IDLE'); 
+  const [uiState, setUiState] = useState('IDLE');
   const [status, setStatus] = useState('IDLE'); 
   const [isConnected, setIsConnected] = useState(false);
   const [backendAddress] = useState('127.0.0.1:8000');
@@ -12,9 +12,24 @@ export default function App() {
   const [replyText, setReplyText] = useState('');
   const [history, setHistory] = useState([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
+  const [inputFocused, setInputFocused] = useState(false);
 
   const inputRef = useRef(null);
   const replyEndRef = useRef(null);
+  const contentRef = useRef(null);
+
+  // Panel height follows its content (like Spotlight growing with results)
+  // instead of sitting at a fixed size with a void under short replies.
+  const [contentHeight, setContentHeight] = useState(null);
+  useEffect(() => {
+    const el = contentRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(([entry]) => {
+      setContentHeight(entry.contentRect.height);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [uiState]);
   const uiStateRef = useRef(uiState);  // latest uiState for async callbacks
   uiStateRef.current = uiState;
   
@@ -457,15 +472,27 @@ export default function App() {
     setUiState('IDLE');
   };
 
+  // Human copy, not console output. "PROCESSING" / "SYS.READY" reads as sci-fi
+  // set dressing; Apple's HUDs say what is happening in plain words.
   const getStatusLabel = () => {
     switch (status) {
-      case 'RUNNING': return 'PROCESSING';
-      case 'LISTENING': return 'LISTENING';
-      case 'DONE': return 'READY';
-      case 'ERROR': return 'ERROR';
-      default: return 'IDLE';
+      case 'RUNNING': return 'Thinking';
+      case 'LISTENING': return 'Listening';
+      case 'ERROR': return 'Something went wrong';
+      case 'DONE':
+      default: return 'Ready';
     }
   };
+
+  const statusDotColor = {
+    RUNNING: 'var(--color-state-busy)',
+    LISTENING: 'var(--color-accent)',
+    ERROR: 'var(--color-state-error)',
+  }[status] || 'var(--color-state-active)';
+
+  // Apple's HUD spring: settles quickly, no perceptible bounce. A HUD that
+  // wobbles on entry feels like a toy.
+  const SPRING = { type: 'spring', stiffness: 420, damping: 38, mass: 0.9 };
 
   if (uiState === 'IDLE') return null;
 
@@ -478,39 +505,46 @@ export default function App() {
       onClick={handleClose}
     >
       <motion.div
-        layout
+        // NOTE: no `layout` prop. Width/height are animated explicitly below,
+        // and framer's layout projection would visually move the panel while
+        // its children still lay out in the un-projected box — which silently
+        // clipped the header off the top of the panel.
         onClick={(e) => e.stopPropagation()}
-        initial={{ opacity: 0, scale: 0.9 }}
+        // Enters by rising and settling, not by zooming — matches how Spotlight
+        // and Control Center arrive.
+        initial={{ opacity: 0, scale: 0.96, y: -8 }}
         animate={
           uiState === 'TEXT_INPUT'
-            ? { width: 640, height: 64, scale: 1, opacity: 1, y: 0 }
+            ? { width: 620, height: 60, scale: 1, opacity: 1, y: 0 }
             : uiState === 'EXPANDED_CHAT'
-            ? { width: 640, height: 420, scale: 1, opacity: 1, y: 0 }
+            ? {
+                width: 660,
+                // Clamped: never smaller than the header+input can occupy,
+                // never taller than the 800px transparent shell can host.
+                height: Math.min(Math.max(contentHeight ?? 240, 190), 560),
+                scale: 1, opacity: 1, y: 0,
+              }
             : uiState === 'VOICE_LISTENING'
-            ? { width: isMac ? 380 : 340, height: 52, scale: 1, opacity: 1, y: isMac ? 0 : 10 }
+            ? { width: isMac ? 380 : 320, height: 52, scale: 1, opacity: 1, y: isMac ? 0 : 10 }
             : { opacity: 0 }
         }
-        transition={{
-          type: 'spring',
-          stiffness: 300,
-          damping: 30,
-          layout: { duration: 0.4, type: 'spring', stiffness: 280, damping: 28 }
-        }}
+        exit={{ opacity: 0, scale: 0.96, y: -8 }}
+        transition={{ ...SPRING, layout: SPRING }}
         style={{
           WebkitAppRegion: 'drag',
           // Radius is per-state: on macOS the listening island keeps a square
           // top edge (flush under the notch) with rounded bottom corners.
           borderRadius:
             uiState === 'VOICE_LISTENING'
-              ? (isMac ? '0 0 20px 20px' : '26px')
-              : '12px',
+              ? (isMac ? '0 0 var(--radius-island) var(--radius-island)' : 'var(--radius-island)')
+              : 'var(--radius-panel)',
           // macOS listening island: solid black so it merges with the notch.
           ...(uiState === 'VOICE_LISTENING' && isMac
             ? { background: '#000', border: 'none', boxShadow: '0 10px 28px rgba(0,0,0,0.55)' }
             : {}),
         }}
         className={`${
-          uiState === 'VOICE_LISTENING' && isMac ? '' : 'glassmorphic-panel'
+          uiState === 'VOICE_LISTENING' && isMac ? '' : 'glass-panel'
         } relative flex flex-col items-center justify-center overflow-hidden select-none ${
           uiState === 'VOICE_LISTENING' ? 'cursor-pointer' : 'cursor-grab active:cursor-grabbing'
         }`}
@@ -532,27 +566,35 @@ export default function App() {
             >
               {/* Mic + live equalizer, grouped so they stay to one side of the
                   notch on macOS. */}
-              <div className="flex items-center gap-3 shrink-0">
-                <motion.div
-                  animate={{ scale: [1, 1.15, 1] }}
-                  transition={{ duration: 1.6, repeat: Infinity, ease: 'easeInOut' }}
-                  className="text-white/90"
-                >
-                  <Mic size={16} />
-                </motion.div>
+              <div className="flex items-center gap-3.5 shrink-0">
+                {/* Mic with a slow breathing ring — presence without anxiety. */}
+                <div className="relative flex items-center justify-center">
+                  <span
+                    aria-hidden
+                    className="absolute inset-[-7px] rounded-full"
+                    style={{
+                      background: 'var(--color-accent)',
+                      animation: 'breathe 2.6s ease-in-out infinite',
+                    }}
+                  />
+                  <Mic size={15} className="relative text-white/95" />
+                </div>
 
-                <div className="flex items-center justify-center gap-[3px] h-5">
+                {/* Monochrome levels. A rainbow gradient reads as a media
+                    player; Apple keeps voice input achromatic so the accent
+                    stays meaningful. */}
+                <div className="flex items-end justify-center gap-[3px] h-4">
                   {[0, 1, 2, 3, 4, 5, 6].map((i) => (
                     <motion.span
                       key={i}
-                      className="w-[3px] h-full rounded-full bg-gradient-to-t from-blue-400 to-fuchsia-300"
+                      className="w-[2.5px] h-full rounded-full bg-white/85"
                       style={{ transformOrigin: 'bottom' }}
-                      animate={{ scaleY: [0.25, 1, 0.4, 0.85, 0.3] }}
+                      animate={{ scaleY: [0.22, 1, 0.38, 0.82, 0.28] }}
                       transition={{
-                        duration: 1.1,
+                        duration: 1.15,
                         repeat: Infinity,
                         ease: 'easeInOut',
-                        delay: i * 0.08,
+                        delay: i * 0.085,
                       }}
                     />
                   ))}
@@ -563,8 +605,8 @@ export default function App() {
                   behind the cutout. Tune 170px to your specific MacBook. */}
               {isMac && <div aria-hidden className="w-[170px] shrink-0" />}
 
-              <span className="shrink-0 text-[10px] font-mono tracking-[0.2em] text-white/60 select-none">
-                LISTENING
+              <span className="shrink-0 text-[12px] font-medium text-label-secondary select-none">
+                Listening
               </span>
             </motion.div>
           )}
@@ -576,54 +618,59 @@ export default function App() {
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
               transition={{ duration: 0.2 }}
+              ref={contentRef}
               style={{ WebkitAppRegion: 'no-drag' }}
-              className={`w-full h-full flex flex-col cursor-default select-text ${
-                uiState === 'EXPANDED_CHAT' ? 'p-5' : 'px-3 py-2 justify-center'
+              className={`w-full flex flex-col cursor-default select-text ${
+                uiState === 'EXPANDED_CHAT' ? 'p-5' : 'h-full px-3 py-2 justify-center'
               }`}
             >
               {uiState === 'EXPANDED_CHAT' && (
                 <>
-                  <div className="flex items-center justify-between mb-4 border-b border-white/5 pb-2 text-[10px] font-mono tracking-wider text-cyber-muted">
-                    <div className="flex items-center gap-3">
-                      <div className="flex items-center gap-1.5">
-                        <span className={`w-1.5 h-1.5 rounded-full ${
-                          status === 'RUNNING' ? 'bg-amber-400 animate-pulse' :
-                          status === 'LISTENING' ? 'bg-pink-400 animate-ping' :
-                          status === 'ERROR' ? 'bg-red-400' : 'bg-white/60'
-                        }`} />
-                        <span className="text-white/80">{getStatusLabel()}</span>
-                      </div>
+                  <div className="flex items-center justify-between mb-4 pb-3 border-b-[0.5px] border-hairline text-[12px]">
+                    <div className="flex items-center gap-2">
+                      <span
+                        className={`w-[7px] h-[7px] rounded-full ${
+                          status === 'RUNNING' || status === 'LISTENING' ? 'animate-pulse' : ''
+                        }`}
+                        style={{ background: statusDotColor }}
+                      />
+                      <span className="font-medium text-label">{getStatusLabel()}</span>
                     </div>
 
-                    <div className="flex items-center gap-4">
-                      <div className="flex items-center gap-1.5">
-                        {isConnected ? (
-                          <Wifi size={10} className="text-emerald-400" />
-                        ) : (
-                          <WifiOff size={10} className="text-red-400" />
-                        )}
-                        <span>{backendAddress}</span>
-                      </div>
-                      <button 
+                    <div className="flex items-center gap-3">
+                      {/* Connection is only worth surfacing when it's broken —
+                          a healthy state needs no badge. */}
+                      {!isConnected && (
+                        <span
+                          className="flex items-center gap-1.5 text-[11px]"
+                          style={{ color: 'var(--color-state-error)' }}
+                          title={`Cannot reach backend at ${backendAddress}`}
+                        >
+                          <WifiOff size={11} />
+                          Offline
+                        </span>
+                      )}
+                      <button
                         onClick={handleClose}
-                        className="hover:text-white transition-colors cursor-pointer"
-                        title="Hide Overlay"
+                        className="flex items-center justify-center w-6 h-6 rounded-full text-label-tertiary hover:text-label hover:bg-white/10 transition-colors cursor-pointer"
+                        title="Hide overlay"
+                        style={{ WebkitAppRegion: 'no-drag' }}
                       >
                         <X size={13} />
                       </button>
                     </div>
                   </div>
 
-                  <div className="flex-1 w-full overflow-y-auto no-scrollbar pr-1 min-h-[120px] mb-4 text-white font-mono text-[13px] leading-relaxed select-text selection:bg-white/10">
+                  <div className="w-full overflow-y-auto no-scrollbar pr-1 max-h-[380px] mb-4 text-label text-[14.5px] leading-[1.55] select-text">
                     {replyText ? (
                       <div className="whitespace-pre-wrap">
                         {/* Format <display> tags cleanly if shown */}
-                        {replyText.replace(/<display>/g, '\n--- Display Render ---\n').replace(/<\/display>/g, '\n----------------------\n')}
+                        {replyText.replace(/<display>/g, '\n').replace(/<\/display>/g, '\n')}
                         {status === 'RUNNING' && <span className="cursor-blink" />}
                       </div>
                     ) : (
-                      <div className="text-cyber-muted italic select-none">
-                        {status === 'LISTENING' ? 'Listening to voice...' : 'Awaiting prompt sequence...'}
+                      <div className="text-label-tertiary select-none">
+                        {status === 'LISTENING' ? 'Listening…' : 'Ask anything.'}
                       </div>
                     )}
                     <div ref={replyEndRef} />
@@ -631,21 +678,35 @@ export default function App() {
                 </>
               )}
 
-              <form 
+              <form
                 onSubmit={handleSubmit}
-                className="relative flex items-center w-full rounded-md border border-white/10 bg-black/60 shadow-[inset_-1px_-1px_3px_rgba(0,0,0,0.8),_inset_1px_1px_2px_rgba(255,255,255,0.03)] px-3 py-1.5 transition-all duration-300 focus-within:border-white/20"
+                style={{ borderRadius: 'var(--radius-field)', WebkitAppRegion: 'no-drag' }}
+                className={`relative flex items-center w-full gap-1 ${
+                  // In the compact state the panel *is* the search bar — nesting a
+                  // second bordered field inside it reads as a redundant frame.
+                  // The well only appears once there's a transcript above it.
+                  uiState === 'EXPANDED_CHAT'
+                    ? `px-2 py-1.5 glass-field ${inputFocused ? 'glass-field-focused' : ''}`
+                    : 'px-2.5 py-1.5 bg-transparent'
+                }`}
               >
                 <button
                   type="button"
                   onClick={toggleVoiceInput}
-                  className={`flex items-center justify-center p-1.5 rounded-md border transition-all duration-300 cursor-pointer ${
-                    status === 'LISTENING' 
-                      ? 'bg-white/10 border-white/30 text-white pulse-mic-icon shadow-[inset_1px_1px_2px_rgba(255,255,255,0.1),_0_0_8px_rgba(255,255,255,0.2)]' 
-                      : 'bg-transparent border-transparent text-cyber-muted hover:text-white hover:bg-white/5'
+                  className={`flex items-center justify-center w-8 h-8 shrink-0 transition-colors duration-200 cursor-pointer ${
+                    status === 'LISTENING'
+                      ? 'text-white pulse-mic-icon'
+                      : 'text-label-secondary hover:text-label hover:bg-white/8'
                   }`}
-                  title={status === 'LISTENING' ? 'Stop Listening' : 'Voice Input'}
+                  style={{
+                    borderRadius: 'var(--radius-control)',
+                    ...(status === 'LISTENING'
+                      ? { background: 'var(--color-accent)' }
+                      : {}),
+                  }}
+                  title={status === 'LISTENING' ? 'Stop listening' : 'Voice input'}
                 >
-                  <Mic size={14} />
+                  <Mic size={15} />
                 </button>
 
                 <input
@@ -653,40 +714,48 @@ export default function App() {
                   type="text"
                   value={inputText}
                   onChange={(e) => setInputText(e.target.value)}
-                  placeholder={status === 'LISTENING' ? 'Listening...' : 'Type query or sequence...'}
+                  onFocus={() => setInputFocused(true)}
+                  onBlur={() => setInputFocused(false)}
+                  placeholder={status === 'LISTENING' ? 'Listening…' : 'Ask TARS anything'}
                   disabled={status === 'LISTENING'}
-                  className="flex-1 bg-transparent border-0 outline-none ring-0 shadow-none text-white placeholder-cyber-muted font-sans text-[13px] ml-3 mr-2 h-7"
+                  className="flex-1 bg-transparent border-0 outline-none ring-0 shadow-none text-label text-[15px] px-1.5 h-8 placeholder:text-label-tertiary"
                   autoFocus
                 />
 
-                <button
-                  type="submit"
-                  disabled={!inputText.trim() || status === 'LISTENING'}
-                  className={`flex items-center justify-center p-1.5 rounded-md border transition-all duration-300 ${
-                    inputText.trim() && status !== 'LISTENING'
-                      ? 'text-white hover:text-black hover:bg-white border-white/20 cursor-pointer shadow-[0_0_8px_rgba(255,255,255,0.1)]'
-                      : 'border-transparent bg-transparent text-cyber-muted cursor-not-allowed opacity-50'
-                  }`}
-                >
-                  <Send size={12} />
-                </button>
+                {/* Send only materializes once there's something to send —
+                    a permanently dimmed button is visual noise. */}
+                <AnimatePresence>
+                  {inputText.trim() && status !== 'LISTENING' && (
+                    <motion.button
+                      type="submit"
+                      initial={{ opacity: 0, scale: 0.7 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      exit={{ opacity: 0, scale: 0.7 }}
+                      transition={{ duration: 0.14 }}
+                      style={{ background: 'var(--color-accent)', borderRadius: 'var(--radius-control)' }}
+                      className="flex items-center justify-center w-8 h-8 shrink-0 text-white cursor-pointer hover:brightness-110 transition-[filter]"
+                      title="Send"
+                    >
+                      <Send size={14} />
+                    </motion.button>
+                  )}
+                </AnimatePresence>
               </form>
 
               {uiState === 'EXPANDED_CHAT' && (
-                <div className="flex items-center justify-between mt-3 text-[9px] font-mono text-cyber-muted select-none">
-                  <div>TARS v1.0.0</div>
-                  <div className="flex gap-2">
-                    <span><kbd className="px-1 bg-white/5 rounded border border-white/10">ESC</kbd> dismiss</span>
-                    <span>·</span>
-                    <span><kbd className="px-1 bg-white/5 rounded border border-white/10">↑↓</kbd> history</span>
-                  </div>
+                <div className="flex items-center justify-end gap-3 mt-2.5 text-[11px] text-label-tertiary select-none">
+                  <span><kbd className="font-sans">esc</kbd> to dismiss</span>
+                  <span><kbd className="font-sans">↑↓</kbd> history</span>
                 </div>
               )}
             </motion.div>
           )}
         </AnimatePresence>
         
-        {(uiState === 'VOICE_LISTENING' || uiState === 'IDLE' || uiState === 'EXPANDED_CHAT') && (
+        {/* The globe is an ambient presence indicator, not decoration — it only
+            belongs on screen while TARS is actually listening or thinking.
+            Hanging it under a resting panel just read as a stray artifact. */}
+        {(status === 'LISTENING' || status === 'RUNNING') && (
            <Globe isListening={status === 'LISTENING'} isProcessing={status === 'RUNNING'} />
         )}
       </motion.div>

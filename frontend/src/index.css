@@ -1,70 +1,123 @@
 @import "tailwindcss";
 
+/* ============================================================================
+   TARS design tokens
+   Target: Apple HUD language — material, not embossed. Hairline borders,
+   generous radii, monochrome restraint, one accent used sparingly.
+   ========================================================================= */
 @theme {
-  --color-cyber-black: #000000;
-  --color-cyber-dark: #050505;
-  --color-cyber-gray: #111111;
-  --color-cyber-border: rgba(255, 255, 255, 0.08);
-  --color-cyber-text: #ffffff;
-  --color-cyber-muted: rgba(255, 255, 255, 0.4);
+  /* Surfaces — layered translucency rather than flat black.
+     Kept deliberately light on tint: past ~0.65 alpha the blur stops reading
+     as frosted glass and the panel just looks like a dark rectangle stained
+     by whatever wallpaper is behind it. */
+  --color-surface: rgba(30, 30, 32, 0.58);
+  --color-surface-raised: rgba(58, 58, 62, 0.55);
+  --color-surface-sunken: rgba(0, 0, 0, 0.22);
 
-  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  --font-mono: "JetBrains Mono", "Courier New", monospace;
+  /* Hairlines. Apple separators are barely-there; 0.08–0.14 alpha, never 1px white. */
+  --color-hairline: rgba(255, 255, 255, 0.09);
+  --color-hairline-strong: rgba(255, 255, 255, 0.16);
+
+  /* Text — a real hierarchy, mirroring Apple's label/secondary/tertiary ramp */
+  --color-label: rgba(255, 255, 255, 0.94);
+  --color-label-secondary: rgba(235, 235, 245, 0.60);
+  --color-label-tertiary: rgba(235, 235, 245, 0.32);
+
+  /* Single accent. Apple's systemBlue, used for state only — never decoration. */
+  --color-accent: #0A84FF;
+  --color-accent-soft: rgba(10, 132, 255, 0.16);
+
+  /* Semantic state */
+  --color-state-active: #30D158;   /* systemGreen */
+  --color-state-busy:   #FF9F0A;   /* systemOrange */
+  --color-state-error:  #FF453A;   /* systemRed */
+
+  /* System font stack: real SF Pro on macOS, Segoe UI Variable on Win 11.
+     Deliberately not a webfont — a HUD must never flash fallback text. */
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable Text",
+               "Segoe UI", system-ui, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", monospace;
+
+  /* Radii — Apple-generous. The overlay reads as a physical object, not a box. */
+  --radius-panel: 22px;
+  --radius-island: 26px;
+  --radius-field: 14px;
+  --radius-control: 10px;
 }
 
-@utility glassmorphic-panel {
-  background: linear-gradient(135deg, rgba(20, 20, 22, 0.75) 0%, rgba(10, 10, 12, 0.85) 100%);
-  backdrop-filter: blur(24px) saturate(180%);
-  -webkit-backdrop-filter: blur(24px) saturate(180%);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-top: 1px solid rgba(255, 255, 255, 0.15);
-  border-left: 1px solid rgba(255, 255, 255, 0.12);
+/* ---------------------------------------------------------------------------
+   The glass material.
+   Three stacked effects: a saturating blur (glass bends light), a top-edge
+   specular highlight (light catches the upper bevel), and a two-stage ambient
+   shadow (contact + cast). Neumorphic *insets* are deliberately dropped —
+   embossing reads dated; modern Apple glass is a material, not a bevel.
+   ------------------------------------------------------------------------ */
+@utility glass-panel {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.08) 0%, rgba(255, 255, 255, 0) 38%),
+    var(--color-surface);
+  /* Heavy blur + a brightness lift: real frosted glass scatters light, so the
+     material should read *lighter* than the wallpaper behind it, never darker. */
+  backdrop-filter: blur(60px) saturate(180%) brightness(1.18);
+  -webkit-backdrop-filter: blur(60px) saturate(180%) brightness(1.18);
+  border: 0.5px solid var(--color-hairline-strong);
   box-shadow:
-    /* Outer soft black shadow */
-    0 30px 60px -12px rgba(0, 0, 0, 0.7),
-    0 18px 36px -18px rgba(0, 0, 0, 0.8),
-    /* Inner Neumorphic glow/shadow */
-    inset 1px 1px 2px rgba(255, 255, 255, 0.1),
-    inset -1px -1px 4px rgba(0, 0, 0, 0.5);
+    0 0 0 0.5px rgba(0, 0, 0, 0.55),             /* crisp edge against any wallpaper */
+    0 12px 32px -8px rgba(0, 0, 0, 0.42),        /* contact shadow */
+    0 32px 72px -12px rgba(0, 0, 0, 0.55),       /* ambient cast */
+    inset 0 0.5px 0 rgba(255, 255, 255, 0.22);   /* specular top edge */
 }
 
-@utility neu-shadow-black {
+/* Recessed input well — reads as carved into the panel, one level down. */
+@utility glass-field {
+  background: var(--color-surface-sunken);
+  border: 0.5px solid var(--color-hairline);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.32);
+  transition: border-color 220ms ease, background-color 220ms ease, box-shadow 220ms ease;
+}
+
+@utility glass-field-focused {
+  border-color: var(--color-hairline-strong);
+  background: rgba(0, 0, 0, 0.36);
   box-shadow:
-    /* Neumorphic premium outer shadow */
-    8px 8px 16px rgba(0, 0, 0, 0.6),
-    -4px -4px 12px rgba(255, 255, 255, 0.03),
-    inset 1px 1px 2px rgba(255, 255, 255, 0.05),
-    inset -1px -1px 2px rgba(0, 0, 0, 0.4);
+    inset 0 1px 2px rgba(0, 0, 0, 0.32),
+    0 0 0 3.5px var(--color-accent-soft);
 }
 
-@utility glow-white-line {
-  filter: drop-shadow(0 0 5px rgba(255, 255, 255, 0.5));
-}
-
-@utility glow-globe {
-  filter: drop-shadow(0 0 8px rgba(255, 255, 255, 0.35));
+/* Raised control (mic / send). Sits one level above the panel. */
+@utility glass-control {
+  background: var(--color-surface-raised);
+  border: 0.5px solid var(--color-hairline);
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.28),
+    inset 0 0.5px 0 rgba(255, 255, 255, 0.10);
 }
 
 @utility no-scrollbar {
-  -ms-overflow-style: none;  /* IE and Edge */
-  scrollbar-width: none;  /* Firefox */
-  &::-webkit-scrollbar {
-    display: none;
-  }
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+  &::-webkit-scrollbar { display: none; }
 }
 
+/* Streaming caret — a soft block, closer to a terminal cursor than a pipe. */
 @utility cursor-blink {
   &::after {
-    content: '|';
-    animation: blink 1s infinite;
-    color: #ffffff;
-    margin-left: 2px;
+    content: '';
+    display: inline-block;
+    width: 2px;
+    height: 1.05em;
+    vertical-align: -0.16em;
+    margin-left: 3px;
+    border-radius: 1px;
+    background: var(--color-label);
+    animation: caret 1.1s steps(1) infinite;
   }
 }
 
-@utility pulse-mic-icon {
-  animation: pulse-mic 2s infinite ease-in-out;
-}
+@utility pulse-mic-icon { animation: pulse-mic 2.2s infinite ease-in-out; }
+
+@utility glow-globe { filter: drop-shadow(0 0 10px rgba(255, 255, 255, 0.22)); }
+@utility glow-white-line { filter: drop-shadow(0 0 5px rgba(255, 255, 255, 0.42)); }
 
 @layer base {
   html, body, #root {
@@ -75,27 +128,38 @@
     overflow: hidden;
     background-color: transparent !important;
     font-family: var(--font-sans);
+    /* Apple's optical tightening at display sizes */
+    letter-spacing: -0.011em;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
   }
+
+  /* The overlay is chrome, not a document — nothing should look web-selectable. */
+  input, textarea { font-family: inherit; }
+  ::selection { background: rgba(10, 132, 255, 0.32); }
 }
 
-/* Pulse animation for microphone */
+@keyframes caret {
+  0%, 50%   { opacity: 1; }
+  51%, 100% { opacity: 0; }
+}
+
 @keyframes pulse-mic {
-  0%, 100% {
-    opacity: 0.4;
-    transform: scale(1);
-    filter: drop-shadow(0 0 2px rgba(255, 255, 255, 0.3));
-  }
-  50% {
-    opacity: 1;
-    transform: scale(1.1);
-    filter: drop-shadow(0 0 8px rgba(255, 255, 255, 0.8));
-  }
+  0%, 100% { opacity: 0.55; transform: scale(1); }
+  50%      { opacity: 1;    transform: scale(1.06); }
 }
 
-/* Blinking cursor for command input and typewriter */
-@keyframes blink {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0; }
+/* Breathing ring for the listening state — slow, calm, never anxious. */
+@keyframes breathe {
+  0%, 100% { transform: scale(1);    opacity: 0.55; }
+  50%      { transform: scale(1.28); opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
 }
