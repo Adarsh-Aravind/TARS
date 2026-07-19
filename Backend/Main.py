@@ -22,7 +22,14 @@ async def lifespan(app: FastAPI):
     # Startup: initialize the SQLite database.
     await init_db()
     yield
-    # Shutdown
+    # Shutdown: release tool-owned resources (the Playwright browser holds a
+    # real Chromium process that would otherwise outlive the server).
+    try:
+        from services.tools import shutdown as shutdown_tools
+
+        await shutdown_tools()
+    except Exception as e:
+        logging.warning("Tool shutdown failed: %s", e)
 
 
 app = FastAPI(
@@ -73,4 +80,19 @@ if __name__ == "__main__":
     # HOST env var only if you understand the risk.
     host = os.environ.get("HOST", "127.0.0.1")
     port = int(os.environ.get("PORT", 8000))
-    uvicorn.run("Main:app", host=host, port=port, reload=True)
+
+    # Reload is OFF by default, and this is load-bearing rather than a
+    # preference. Pending tool confirmations live in memory in services.confirm:
+    # the SSE stream parks a future there and the /confirm POST resolves it. A
+    # reload mid-turn (or a second worker) puts those two halves in different
+    # processes, and every confirmation fails with "unknown or expired".
+    #
+    # For the same reason: never run this with --workers greater than 1.
+    reload = os.environ.get("TARS_RELOAD") == "1"
+    if reload:
+        logging.warning(
+            "TARS_RELOAD=1: auto-reload is on. Tool confirmations will break if a "
+            "reload lands mid-request."
+        )
+
+    uvicorn.run("Main:app", host=host, port=port, reload=reload, workers=1)

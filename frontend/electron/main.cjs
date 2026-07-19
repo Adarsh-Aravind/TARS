@@ -22,28 +22,48 @@ let voiceMode = false; // top-center "listening" mode — pins the window open
 // ---------------------------------------------------------------------------
 // Best-effort local backend spawn
 // ---------------------------------------------------------------------------
-// On macOS we assume the backend is reached over a Live Share / port-forward
-// tunnel, so we don't spawn Python locally. On Windows/Linux we try the repo
-// venv, then fall back to `python` on PATH. If it can't start, the renderer
-// simply shows "disconnected" and the user can start it manually.
-function spawnBackend() {
-  if (IS_MAC) {
-    console.log('[TARS] Skipping local backend spawn on macOS.');
+// Identical on all three platforms: if nothing is answering on :8000, start the
+// repo's Python backend ourselves. This matters because the app can be started
+// two ways — via scripts/launch.py (which starts the backend first) or by
+// double-clicking the packaged app (which doesn't). Health-checking first means
+// neither path ends up with two backends fighting over the port.
+function backendIsReachable() {
+  return new Promise((resolve) => {
+    const req = require('http').get(
+      { host: '127.0.0.1', port: 8000, path: '/health', timeout: 1500 },
+      (res) => { res.resume(); resolve(res.statusCode === 200); }
+    );
+    req.on('error', () => resolve(false));
+    req.on('timeout', () => { req.destroy(); resolve(false); });
+  });
+}
+
+async function spawnBackend() {
+  if (await backendIsReachable()) {
+    console.log('[TARS] Backend already running — not spawning another.');
     return;
   }
 
+  const fs = require('fs');
   const backendDir = path.join(__dirname, '..', '..', 'Backend');
   const venvPython = process.platform === 'win32'
     ? path.join(__dirname, '..', '..', '.venv', 'Scripts', 'python.exe')
     : path.join(__dirname, '..', '..', '.venv', 'bin', 'python');
 
-  const fs = require('fs');
-  const pythonExecutable = fs.existsSync(venvPython) ? venvPython : 'python';
+  // Fall back to a system Python; `python3` is the correct name on macOS/Linux,
+  // where bare `python` is often absent entirely.
+  const fallback = process.platform === 'win32' ? 'python' : 'python3';
+  const pythonExecutable = fs.existsSync(venvPython) ? venvPython : fallback;
+
+  if (!fs.existsSync(backendDir)) {
+    console.error('[TARS] Backend directory not found; running UI only.');
+    return;
+  }
 
   try {
     backendProcess = spawn(pythonExecutable, ['Main.py'], {
       cwd: backendDir,
-      env: { ...process.env, HOST: '127.0.0.1', PORT: '8000' },
+      env: { ...process.env, HOST: '127.0.0.1', PORT: '8000', PYTHONUNBUFFERED: '1' },
       stdio: 'inherit',
     });
     backendProcess.on('error', (err) => {
@@ -180,13 +200,40 @@ function toggleOverlay() {
 // ---------------------------------------------------------------------------
 // Tray
 // ---------------------------------------------------------------------------
+// A 16x16 template icon drawn inline, so the tray entry is actually visible
+// without shipping a binary asset. macOS treats `template` images as masks and
+// recolours them for light/dark menu bars automatically.
+function trayIcon() {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16">
+    <rect x="3" y="1.5" width="4" height="13" rx="1" fill="black"/>
+    <rect x="9" y="1.5" width="4" height="13" rx="1" fill="black"/>
+  </svg>`;
+  const img = nativeImage.createFromDataURL(
+    'data:image/svg+xml;base64,' + Buffer.from(svg).toString('base64')
+  );
+  if (IS_MAC) img.setTemplateImage(true);
+  return img;
+}
+
 function createTray() {
-  // Empty native image keeps a valid (if blank) tray entry without shipping an
-  // icon asset; the tooltip/menu still work.
-  tray = new Tray(nativeImage.createEmpty());
+  tray = new Tray(trayIcon());
   tray.setToolTip('TARS');
   tray.setContextMenu(Menu.buildFromTemplate([
-    { label: 'Show TARS', click: () => summon('summon-text') },
+    { label: 'Show TARS', accelerator: 'Alt+Space', click: () => summon('summon-text') },
+    { label: 'Voice input', accelerator: 'Shift+Alt+Space', click: () => summon('summon-voice') },
+    { type: 'separator' },
+    {
+      label: 'Start at login',
+      type: 'checkbox',
+      checked: app.getLoginItemSettings().openAtLogin,
+      click: (item) => {
+        app.setLoginItemSettings({
+          openAtLogin: item.checked,
+          openAsHidden: true,      // honoured on macOS; TARS starts in the tray
+          args: ['--hidden'],
+        });
+      },
+    },
     { type: 'separator' },
     {
       label: 'Quit',
@@ -211,26 +258,45 @@ function registerIpcHandlers() {
 // ---------------------------------------------------------------------------
 // Lifecycle
 // ---------------------------------------------------------------------------
-app.whenReady().then(() => {
-  if (IS_MAC && app.dock) app.dock.hide();
+// A second launch (double-clicking the app while it's already in the tray)
+// should summon the existing instance, not start a rival one that fails to
+// grab the global shortcuts and spawns a second backend.
+const gotTheLock = app.requestSingleInstanceLock();
+if (!gotTheLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => summon('summon-text'));
 
-  // Grant microphone access (voice input) but deny everything else.
-  session.defaultSession.setPermissionRequestHandler((_wc, permission, callback) => {
-    callback(permission === 'media');
+  app.whenReady().then(() => {
+    if (IS_MAC && app.dock) app.dock.hide();
+
+    // Grant microphone access (voice input) but deny everything else.
+    session.defaultSession.setPermissionRequestHandler((_wc, permission, callback) => {
+      callback(permission === 'media');
+    });
+
+    spawnBackend();
+    createWindow();
+    createTray();
+    registerIpcHandlers();
+
+    // Registration fails silently if another app owns the combo, which would
+    // otherwise look like "TARS is broken" with no explanation anywhere.
+    const shortcuts = [
+      ['Alt+Space', toggleOverlay],
+      ['Shift+Alt+Space', () => summon('summon-voice')],
+    ];
+    for (const [accelerator, handler] of shortcuts) {
+      if (!globalShortcut.register(accelerator, handler)) {
+        console.warn(`[TARS] Could not register ${accelerator} — another app has it.`);
+      }
+    }
+
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    });
   });
-
-  spawnBackend();
-  createWindow();
-  createTray();
-  registerIpcHandlers();
-
-  globalShortcut.register('Alt+Space', toggleOverlay);       // text input
-  globalShortcut.register('Shift+Alt+Space', () => summon('summon-voice')); // voice input
-
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
-  });
-});
+}
 
 app.on('window-all-closed', () => {
   // Stay alive in the tray; only quit explicitly.

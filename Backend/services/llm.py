@@ -1,57 +1,63 @@
+"""LLM agent loop.
+
+The important property of this module is that it *iterates*. A single request
+runs the model, executes whatever tools it asked for, feeds the results back,
+and runs the model again — up to MAX_ITERATIONS times — until the model stops
+asking for tools. That is what makes "open YouTube, search for lofi, and turn
+the volume down" a single instruction instead of three.
+
+Emitted events (each yielded as a JSON string):
+
+    {"type": "token",       "data": str}
+    {"type": "tool_start",  "name": str, "args": dict}
+    {"type": "tool_result", "name": str, "status": str, "message": str}
+    {"type": "confirm",     "id": str, "prompt": str, "name": str}
+    {"type": "error",       "data": str}
+"""
 import json
 import logging
-from typing import List, Dict, Any, Optional, AsyncGenerator
+from typing import Any, AsyncGenerator, Dict, List, Optional
+
 from openai import (
-    AsyncOpenAI,
     APIConnectionError,
     APITimeoutError,
+    AsyncOpenAI,
     AuthenticationError,
+    BadRequestError,
     RateLimitError,
 )
 
 from config import settings
-from services.tools import handle_tool_call, TOOLS_SCHEMA
-from services import personality
+from services import confirm, personality
+from services.tools import TOOLS_SCHEMA, handle_tool_call, needs_confirmation
 
 logger = logging.getLogger(__name__)
 
+# How many model->tools->model round trips one user turn may take. High enough
+# for real multi-step tasks, low enough that a confused model can't spin.
+MAX_ITERATIONS = 8
+
 
 class LLMEngine:
-    """
-    LLM abstraction used by api/chat.py and api/v1/stream.py.
-
-    Renamed from LLMService -> LLMEngine (that was the naming mismatch
-    noted in project_summary.md). The interface below matches how both
-    callers already invoke it:
-
-        async for chunk_str in LLMEngine.stream_response(session_id, user_message, provider):
-            chunk = json.loads(chunk_str)   # {"type": "token", "data": ...}
-                                             # {"type": "tool_call", "name": ..., "args": ...}
-                                             # {"type": "error", "data": ...}
-    """
-
     _instance: Optional["LLMEngine"] = None
 
-    # Per-session rolling history, kept in memory so the rolling window
-    # actually has something to roll over. Swap this for a call into
-    # db.database (e.g. get_session_messages(session_id)) once that
-    # helper is exposed, so history survives a backend restart.
-    _session_history: Dict[str, List[Dict[str, str]]] = {}
+    # Per-session rolling history. Only user and final assistant turns are kept:
+    # intermediate tool traffic is scoped to the request that produced it, so a
+    # trimmed window can never leave an orphaned tool message referencing an
+    # assistant turn that has already rolled off (which providers reject).
+    _session_history: Dict[str, List[Dict[str, Any]]] = {}
 
     def __init__(self, provider: Optional[str] = None):
         active_provider = provider or settings.LLM_PROVIDER
 
         if active_provider == "groq":
-            # Groq serves an OpenAI-compatible API, so the SDK works unchanged —
-            # only the base URL and key differ.
             if not settings.GROQ_API_KEY:
                 raise RuntimeError(
                     "LLM_PROVIDER=groq but GROQ_API_KEY is unset. "
                     "Copy Backend/.env.example to Backend/.env and set it."
                 )
             self.client = AsyncOpenAI(
-                base_url=settings.GROQ_BASE_URL,
-                api_key=settings.GROQ_API_KEY,
+                base_url=settings.GROQ_BASE_URL, api_key=settings.GROQ_API_KEY
             )
         elif active_provider == "ollama":
             self.client = AsyncOpenAI(
@@ -59,8 +65,6 @@ class LLMEngine:
                 api_key="ollama",  # required by the SDK, ignored by Ollama
             )
         elif active_provider == "gemini":
-            # Gemini exposes an OpenAI-compatible endpoint; point the SDK at it
-            # explicitly, otherwise it would hit OpenAI's default base URL.
             self.client = AsyncOpenAI(
                 base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
                 api_key=settings.GEMINI_API_KEY,
@@ -71,149 +75,230 @@ class LLMEngine:
         self.provider = active_provider
         self.model = settings.LLM_MODEL
         self.temperature = settings.TEMPERATURE
-        self.max_history_turns = 10  # rolling context window (5-10 turns)
+        self.max_history_turns = 12
 
     @classmethod
     def _get_instance(cls, provider: Optional[str] = None) -> "LLMEngine":
-        # Rebuild the client if a call explicitly asks for a different provider.
         if cls._instance is None or (provider and provider != cls._instance.provider):
             cls._instance = cls(provider)
         return cls._instance
 
-    def _apply_rolling_window(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        if len(messages) <= self.max_history_turns:
-            return messages
-        has_system = messages[0].get("role") == "system"
-        if has_system:
-            return [messages[0]] + messages[-(self.max_history_turns - 1):]
-        return messages[-self.max_history_turns:]
+    # ------------------------------------------------------------------
+    # History
+    # ------------------------------------------------------------------
+    def _trim(self, history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Keep the system prompt plus the most recent N turns."""
+        if len(history) <= self.max_history_turns:
+            return history
+        return [history[0]] + history[-(self.max_history_turns - 1):]
 
     def _build_messages(self, session_id: str, user_message: str) -> List[Dict[str, Any]]:
         history = self._session_history.setdefault(
             session_id, [{"role": "system", "content": ""}]
         )
-        # Rebuild the system prompt every turn: the personality dials can be
-        # changed mid-conversation (via the set_personality tool), and a stale
-        # system message would keep the old settings until the next restart.
+        # Rebuild the system prompt every turn: the personality dials can change
+        # mid-conversation via set_personality, and a stale system message would
+        # keep the old settings until restart.
         history[0] = {"role": "system", "content": personality.build_system_prompt()}
         history.append({"role": "user", "content": user_message})
-        # Trim the *stored* history in place, not just the returned copy —
-        # otherwise the in-memory history grows unbounded for the lifetime of
-        # the process (one entry per turn, forever).
-        trimmed = self._apply_rolling_window(history)
-        self._session_history[session_id] = trimmed
-        return trimmed
+        history = self._trim(history)
+        self._session_history[session_id] = history
+        # Return a copy: the agent loop appends tool traffic to its working list,
+        # and that must not leak into persisted history.
+        return list(history)
 
+    def _remember(self, session_id: str, reply: str) -> None:
+        if reply.strip():
+            self._session_history.setdefault(session_id, []).append(
+                {"role": "assistant", "content": reply}
+            )
+
+    @classmethod
+    def reset_session(cls, session_id: str) -> None:
+        cls._session_history.pop(session_id, None)
+
+    # ------------------------------------------------------------------
+    # One streamed model call
+    # ------------------------------------------------------------------
+    async def _stream_once(self, messages: List[Dict[str, Any]]):
+        """Run one completion. Yields ("token", str); returns collected tool calls."""
+        response = await self.client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            temperature=self.temperature,
+            max_tokens=settings.MAX_TOKENS,
+            stream=True,
+            tools=TOOLS_SCHEMA,
+            tool_choice="auto",
+        )
+
+        content = ""
+        tool_calls: Dict[int, Dict[str, str]] = {}
+
+        async for chunk in response:
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+
+            if getattr(delta, "content", None):
+                content += delta.content
+                yield ("token", delta.content)
+
+            for tc in getattr(delta, "tool_calls", None) or []:
+                idx = tc.index
+                slot = tool_calls.setdefault(idx, {"id": "", "name": "", "arguments": ""})
+                # Each field arrives incrementally and may be absent in any chunk.
+                if tc.id:
+                    slot["id"] = tc.id
+                if tc.function and tc.function.name:
+                    slot["name"] = tc.function.name
+                if tc.function and tc.function.arguments:
+                    slot["arguments"] += tc.function.arguments
+
+        yield ("done", {"content": content, "tool_calls": tool_calls})
+
+    # ------------------------------------------------------------------
+    # Agent loop
+    # ------------------------------------------------------------------
     @classmethod
     async def stream_response(
         cls, session_id: str, user_message: str, provider: Optional[str] = None
     ) -> AsyncGenerator[str, None]:
         self = cls._get_instance(provider)
         messages = self._build_messages(session_id, user_message)
-        full_reply = ""
-        tool_calls = {}
+        spoken_reply = ""
 
         try:
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=self.temperature,
-                stream=True,
-                tools=TOOLS_SCHEMA,
-            )
+            for iteration in range(MAX_ITERATIONS):
+                content = ""
+                tool_calls: Dict[int, Dict[str, str]] = {}
 
-            async for chunk in response:
-                if not chunk.choices:
-                    continue
-                delta = chunk.choices[0].delta
+                async for kind, payload in self._stream_once(messages):
+                    if kind == "token":
+                        spoken_reply += payload
+                        yield json.dumps({"type": "token", "data": payload})
+                    else:
+                        content = payload["content"]
+                        tool_calls = payload["tool_calls"]
 
-                if getattr(delta, "content", None):
-                    full_reply += delta.content
-                    yield json.dumps({"type": "token", "data": delta.content})
+                # No tools requested — the model is done talking.
+                if not tool_calls:
+                    break
 
-                if getattr(delta, "tool_calls", None):
-                    for tc in delta.tool_calls:
-                        idx = tc.index
-                        if idx not in tool_calls:
-                            tool_calls[idx] = {"id": tc.id, "name": tc.function.name, "arguments": ""}
-                        if tc.function.arguments:
-                            tool_calls[idx]["arguments"] += tc.function.arguments
-
-            # Execute tools if requested
-            if tool_calls:
-                assistant_message = {"role": "assistant", "content": None, "tool_calls": []}
-                for idx, tc in tool_calls.items():
-                    assistant_message["tool_calls"].append({
-                        "id": tc["id"],
-                        "type": "function",
-                        "function": {
-                            "name": tc["name"],
-                            "arguments": tc["arguments"]
+                # Record the assistant's tool-call turn before the results.
+                messages.append({
+                    "role": "assistant",
+                    "content": content or None,
+                    "tool_calls": [
+                        {
+                            "id": tc["id"],
+                            "type": "function",
+                            "function": {"name": tc["name"], "arguments": tc["arguments"] or "{}"},
                         }
-                    })
-                messages.append(assistant_message)
+                        for tc in tool_calls.values()
+                    ],
+                })
 
-                for idx, tc in tool_calls.items():
+                for tc in tool_calls.values():
                     name = tc["name"]
                     try:
-                        args = json.loads(tc["arguments"])
+                        args = json.loads(tc["arguments"] or "{}")
                     except json.JSONDecodeError:
                         args = {}
+                    # Models emit literal `null` for no-argument tools, and some
+                    # emit a bare list. Downstream code assumes a dict.
+                    if not isinstance(args, dict):
+                        args = {}
 
-                    # Structured tool-call event (consumed by the WebSocket
-                    # stream endpoint for persistence); ignored by SSE clients.
-                    yield json.dumps({"type": "tool_call", "name": name, "args": args})
+                    # The tool runner is a generator, not a coroutine, so the
+                    # `confirm` event reaches the client *before* it blocks
+                    # waiting on the answer. Buffering these would deadlock.
+                    holder: Dict[str, Any] = {}
+                    async for event in self._run_tool(name, args, holder):
+                        yield event
 
-                    yield json.dumps({"type": "token", "data": f"\n\n*(System: Executing {name}...)*\n"})
-                    
-                    result = await handle_tool_call(name, args)
-                    
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tc["id"],
                         "name": name,
-                        "content": json.dumps(result)
+                        "content": json.dumps(holder.get("value", {}))[:6000],
                     })
+            else:
+                # Loop exhausted without the model settling.
+                yield json.dumps({
+                    "type": "token",
+                    "data": " I've hit my step limit on this one — tell me how to narrow it down.",
+                })
 
-                # Follow-up LLM stream after tools
-                follow_up = await self.client.chat.completions.create(
-                    model=self.model,
-                    messages=messages,
-                    temperature=self.temperature,
-                    stream=True,
-                    tools=TOOLS_SCHEMA
-                )
-                async for chunk in follow_up:
-                    if not chunk.choices:
-                        continue
-                    delta = chunk.choices[0].delta
-                    if getattr(delta, "content", None):
-                        full_reply += delta.content
-                        yield json.dumps({"type": "token", "data": delta.content})
-
-            if full_reply:
-                self._session_history[session_id].append(
-                    {"role": "assistant", "content": full_reply}
-                )
+            self._remember(session_id, spoken_reply)
 
         except Exception as e:
-            logger.error(f"Error in LLM stream: {e}", exc_info=True)
-            # Distinguish "can't reach the provider" from "the provider answered
-            # with an error" — the old catch-all blamed connectivity for what
-            # were often schema/auth/rate-limit failures, which sends you
-            # debugging the wrong thing.
-            if isinstance(e, (APIConnectionError, APITimeoutError)):
-                if self.provider == "ollama":
-                    detail = f"Cannot reach Ollama at {settings.OLLAMA_BASE_URL}. Is it running?"
-                else:
-                    detail = f"Cannot reach {self.provider}. Check your network connection."
-            elif isinstance(e, AuthenticationError):
-                detail = f"{self.provider} rejected the API key. Check your .env."
-            elif isinstance(e, RateLimitError):
-                detail = f"{self.provider} rate limit hit. Wait a moment and retry."
-            else:
-                detail = f"{self.provider} error: {e}"
-            yield json.dumps({"type": "error", "data": detail})
+            logger.error("Agent loop failed: %s", e, exc_info=True)
+            yield json.dumps({"type": "error", "data": self._explain(e)})
 
-# Backwards-compatible alias
+    async def _run_tool(
+        self, name: str, args: Dict[str, Any], out: Dict[str, Any]
+    ) -> AsyncGenerator[str, None]:
+        """Execute one tool, gating destructive calls behind user confirmation.
+
+        Yields stream events as they occur and stashes the tool's return value in
+        `out["value"]` for the caller. It must stay a generator: the `confirm`
+        event has to reach the client before we await the user's answer.
+        """
+        yield json.dumps({"type": "tool_start", "name": name, "args": args})
+
+        prompt = needs_confirmation(name, args)
+        if prompt:
+            confirm_id = confirm.create(prompt, name)
+            yield json.dumps(
+                {"type": "confirm", "id": confirm_id, "prompt": prompt, "name": name}
+            )
+            # Surface the ask in the spoken stream too, so voice-only users hear it.
+            yield json.dumps({"type": "token", "data": f" {prompt} "})
+
+            approved = await confirm.wait(confirm_id)
+            if approved is None:
+                value = {
+                    "status": "cancelled",
+                    "message": "The user did not respond in time. The action was NOT performed. "
+                               "Do not retry it without asking again.",
+                }
+            elif not approved:
+                value = {
+                    "status": "denied",
+                    "message": "The user declined this action. Do not retry it. "
+                               "Acknowledge briefly and move on.",
+                }
+            else:
+                value = await handle_tool_call(name, args)
+        else:
+            value = await handle_tool_call(name, args)
+
+        out["value"] = value
+        yield json.dumps({
+            "type": "tool_result",
+            "name": name,
+            "status": value.get("status", "unknown"),
+            "message": str(value.get("message", ""))[:500],
+        })
+
+    def _explain(self, e: Exception) -> str:
+        """Turn a provider exception into something worth reading."""
+        if isinstance(e, (APIConnectionError, APITimeoutError)):
+            if self.provider == "ollama":
+                return f"Cannot reach Ollama at {settings.OLLAMA_BASE_URL}. Is it running?"
+            return f"Cannot reach {self.provider}. Check your network connection."
+        if isinstance(e, AuthenticationError):
+            return f"{self.provider} rejected the API key. Check Backend/.env."
+        if isinstance(e, RateLimitError):
+            return f"{self.provider} rate limit hit. Wait a moment and retry."
+        if isinstance(e, BadRequestError):
+            return (
+                f"{self.provider} rejected the request — often an unsupported tool schema "
+                f"for model '{self.model}'. Details: {e}"
+            )
+        return f"{self.provider} error: {e}"
+
+
+# Backwards-compatible alias used by api/v1/stream.py.
 LLMService = LLMEngine

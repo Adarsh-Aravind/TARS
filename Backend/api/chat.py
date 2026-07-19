@@ -58,12 +58,19 @@ async def chat_stream(request: ChatRequest):
         try:
             async for chunk_str in LLMService.stream_response(SSE_SESSION_ID, user_message):
                 chunk = json.loads(chunk_str)
-                if chunk.get("type") == "token":
+                kind = chunk.get("type")
+
+                if kind == "token":
                     assistant_reply += chunk["data"]
                     # Format as Server-Sent Events (SSE)
                     yield f"data: {json.dumps({'chunk': chunk['data']})}\n\n"
-                elif chunk.get("type") == "error":
+                elif kind == "error":
                     yield f"event: error\ndata: {json.dumps({'detail': chunk['data']})}\n\n"
+                else:
+                    # Agent telemetry: tool_start / tool_result / confirm. The
+                    # overlay renders these as activity chips and, for `confirm`,
+                    # an approve/deny prompt.
+                    yield f"data: {json.dumps({'event': chunk})}\n\n"
 
             # Normal completion: persist the assistant turn.
             if assistant_reply:
@@ -86,6 +93,31 @@ async def chat_stream(request: ChatRequest):
 
 
 
+
+
+class ConfirmRequest(BaseModel):
+    id: str
+    approved: bool
+
+
+@router.post("/confirm")
+async def confirm_action(request: ConfirmRequest):
+    """Answer a destructive-action confirmation raised mid-stream by the agent."""
+    from services import confirm
+
+    if not confirm.resolve(request.id, request.approved):
+        raise HTTPException(
+            status_code=404,
+            detail="That confirmation is unknown or has already expired.",
+        )
+    return {"status": "ok", "approved": request.approved}
+
+
+@router.post("/reset")
+async def reset_conversation():
+    """Clear the overlay session's rolling context."""
+    LLMService.reset_session(SSE_SESSION_ID)
+    return {"status": "ok"}
 
 
 @router.get("/audio/tars-tts")

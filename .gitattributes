@@ -1,0 +1,29 @@
+# Line-ending policy.
+#
+# This repo is developed on Windows and run on macOS, so this file is
+# load-bearing. A shell script checked out with CRLF endings fails on macOS with
+# a confusing "bad interpreter: /usr/bin/env bash^M" — force LF on anything a
+# Unix shell has to parse, and CRLF on anything cmd.exe parses.
+
+* text=auto
+
+# Unix shells: must be LF.
+*.sh        text eol=lf
+*.command   text eol=lf
+*.bash      text eol=lf
+
+# Windows batch: must be CRLF, or `goto` labels can misbehave.
+*.bat       text eol=crlf
+*.cmd       text eol=crlf
+
+# Python is read by the interpreter, not a shell, but keep it LF for
+# consistency across the two platforms.
+*.py        text eol=lf
+
+# Binary assets — never touch these.
+*.onnx      binary
+*.bin       binary
+*.png       binary
+*.jpg       binary
+*.wav       binary
+*.db        binary

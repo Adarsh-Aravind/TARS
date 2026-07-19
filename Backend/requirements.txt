@@ -17,3 +17,8 @@ kokoro-onnx
 onnxruntime
 pedalboard
 soundfile
+
+# Agent tooling
+psutil            # battery / CPU / disk for system_info
+send2trash        # delete_file trashes rather than destroys
+playwright        # browser_* tools; also needs: playwright install chromium

@@ -13,6 +13,10 @@ export default function App() {
   const [history, setHistory] = useState([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
   const [inputFocused, setInputFocused] = useState(false);
+  // Agent telemetry: what TARS is doing right now, and any destructive action
+  // waiting on the user's yes/no.
+  const [activity, setActivity] = useState([]);
+  const [pendingConfirm, setPendingConfirm] = useState(null);
 
   const inputRef = useRef(null);
   const replyEndRef = useRef(null);
@@ -341,6 +345,59 @@ export default function App() {
     window.electronAPI?.setVoiceMode?.(uiState === 'VOICE_LISTENING' || uiState === 'IDLE');
   }, [uiState]);
 
+  // Human-readable labels for the agent's tool activity chips.
+  const TOOL_LABELS = {
+    launch_app: 'Opening app', open_website: 'Opening', set_volume: 'Adjusting volume',
+    media_control: 'Media', clipboard: 'Clipboard', notify: 'Notifying',
+    system_info: 'Checking system', run_shell: 'Running command', power_control: 'Power',
+    find_files: 'Searching files', read_file: 'Reading file', write_file: 'Writing file',
+    move_file: 'Moving file', delete_file: 'Deleting', web_search: 'Searching the web',
+    fetch_page: 'Reading page', browser_open: 'Browsing', browser_click: 'Clicking',
+    browser_type: 'Typing', browser_read: 'Reading page', set_personality: 'Adjusting personality',
+  };
+
+  // Agent stream events: tool_start / tool_result / confirm.
+  const handleAgentEvent = (evt) => {
+    if (evt.type === 'tool_start') {
+      setActivity((prev) => [
+        ...prev,
+        { name: evt.name, label: TOOL_LABELS[evt.name] || evt.name, state: 'running' },
+      ]);
+    } else if (evt.type === 'tool_result') {
+      // Mark the most recent running entry for this tool as settled.
+      setActivity((prev) => {
+        const next = [...prev];
+        for (let i = next.length - 1; i >= 0; i--) {
+          if (next[i].name === evt.name && next[i].state === 'running') {
+            next[i] = { ...next[i], state: evt.status === 'success' ? 'done' : 'failed' };
+            break;
+          }
+        }
+        return next;
+      });
+    } else if (evt.type === 'confirm') {
+      setPendingConfirm({ id: evt.id, prompt: evt.prompt, name: evt.name });
+      // A confirmation needs the panel visible even if this began as voice.
+      setUiState('EXPANDED_CHAT');
+    }
+  };
+
+  const respondToConfirm = async (approved) => {
+    const current = pendingConfirm;
+    if (!current) return;
+    setPendingConfirm(null);
+    try {
+      await fetch(`http://${backendAddress}/api/v1/confirm`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: current.id, approved }),
+      });
+    } catch (e) {
+      console.error('Confirmation failed to send', e);
+      setReplyText((prev) => prev + '\n[ERROR]: could not send confirmation.');
+    }
+  };
+
   // Dispatch query to backend
   const dispatchQuery = async (query) => {
     if (!query.trim()) return;
@@ -355,6 +412,8 @@ export default function App() {
     
     setStatus('RUNNING');
     setReplyText('');
+    setActivity([]);
+    setPendingConfirm(null);
     stopAudio(); // Stop old speech
 
     try {
@@ -417,6 +476,8 @@ export default function App() {
                          speakText(sentenceBuffer.trim());
                          sentenceBuffer = "";
                      }
+                  } else if (data.event) {
+                     handleAgentEvent(data.event);
                   } else if (data.detail) {
                      setStatus('ERROR');
                      setReplyText(prev => prev + "\n[ERROR]: " + data.detail);
@@ -448,6 +509,12 @@ export default function App() {
 
   const handleKeyDown = (e) => {
     if (e.key === 'Escape') {
+      // Escape must not silently abandon a held action — treat it as a denial
+      // so the agent loop unblocks instead of waiting out its timeout.
+      if (pendingConfirm) {
+        respondToConfirm(false);
+        return;
+      }
       setUiState('IDLE');
     } else if (e.key === 'ArrowUp' && (uiState === 'TEXT_INPUT' || uiState === 'EXPANDED_CHAT')) {
       if (history.length > 0 && historyIndex < history.length - 1) {
@@ -660,6 +727,69 @@ export default function App() {
                       </button>
                     </div>
                   </div>
+
+                  {/* What the agent is actually doing, step by step. */}
+                  {activity.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5 mb-3">
+                      {activity.map((a, i) => (
+                        <span
+                          key={i}
+                          className="flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] bg-white/8 text-label-secondary"
+                        >
+                          <span
+                            className="w-1.5 h-1.5 rounded-full shrink-0"
+                            style={{
+                              background:
+                                a.state === 'done'
+                                  ? 'var(--color-state-success, #4ade80)'
+                                  : a.state === 'failed'
+                                  ? 'var(--color-state-error)'
+                                  : 'var(--color-accent)',
+                              opacity: a.state === 'running' ? 0.6 : 1,
+                            }}
+                          />
+                          {a.label}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Destructive action held for approval. */}
+                  <AnimatePresence>
+                    {pendingConfirm && (
+                      <motion.div
+                        initial={{ opacity: 0, y: -6 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0, y: -6 }}
+                        className="w-full mb-3 p-3 rounded-xl border"
+                        style={{
+                          borderColor: 'var(--color-state-error)',
+                          background: 'rgba(255,69,58,0.08)',
+                          WebkitAppRegion: 'no-drag',
+                        }}
+                      >
+                        <div className="text-[13px] text-label mb-2.5 leading-snug select-text">
+                          {pendingConfirm.prompt}
+                        </div>
+                        <div className="flex gap-2">
+                          <button
+                            onClick={() => respondToConfirm(true)}
+                            autoFocus
+                            className="px-3 py-1 rounded-lg text-[12px] font-medium text-white cursor-pointer"
+                            style={{ background: 'var(--color-state-error)' }}
+                          >
+                            Allow
+                          </button>
+                          <button
+                            onClick={() => respondToConfirm(false)}
+                            className="px-3 py-1 rounded-lg text-[12px] bg-white/10 text-label hover:bg-white/15 cursor-pointer"
+                          >
+                            Deny
+                          </button>
+                        </div>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
 
                   <div className="w-full overflow-y-auto no-scrollbar pr-1 max-h-[380px] mb-4 text-label text-[14.5px] leading-[1.55] select-text">
                     {replyText ? (
